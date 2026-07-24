@@ -102,3 +102,11 @@ export function effectiveStatus(meta: RunMeta): RunStatus | "exited" {
     if (processExists(meta.pid)) return "running";
     return "exited";
 }
+
+/** True when this meta was spawned by the given parent pi PID (default: this process). */
+export function ownedByThisParent(
+    meta: Pick<RunMeta, "spawnPid">,
+    parentPid: number = process.pid,
+): boolean {
+    return meta.spawnPid === parentPid;
+}
