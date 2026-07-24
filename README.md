@@ -37,7 +37,7 @@ launch is the result · completion triggers fetch · the foreground never blocks
 | Tool | Blocks? | What it does |
 |------|---------|--------------|
 | `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `approve`, `allow_nested`. |
-| `subagent_list` | never | List running/finished runs with status, elapsed, and spend. |
+| `subagent_list` | never | List running/finished runs with status, model, elapsed, and spend. |
 | `subagent_output` | never | Tail a run's live output as it stands right now. |
 | `subagent_result` | never | Read a finished run's final output (says "still running" otherwise). |
 | `subagent_stop` | never | SIGTERM a running run's process group. |
