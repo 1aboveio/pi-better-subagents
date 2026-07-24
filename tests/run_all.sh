@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run all pi-async-subagents integration tests; summarize PASS/FAIL.
+# Run all pi-better-subagents integration tests; summarize PASS/FAIL.
 #
 # Usage:
 #   tests/run_all.sh

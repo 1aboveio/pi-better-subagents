@@ -5,7 +5,7 @@
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-test_banner "Scenario 2 — gh issue list (exoulster/pi-async-subagents)"
+test_banner "Scenario 2 — gh issue list (exoulster/pi-better-subagents)"
 
 # gh authenticates via the macOS keychain by default. A spawned/headless child
 # touching the keychain can trigger a prompt it can't answer, so gh may hang.
@@ -25,8 +25,8 @@ ID="test_ghissues_$$"
 # misreads as an error and then loops investigating.
 run_child "$ID" "read,bash" \
     "Run this exact bash command with no extra arguments or trailing punctuation:
-gh issue list -R exoulster/pi-async-subagents --state open --json number --jq length
-It prints the number of open issues (0 means none — a valid answer, not an error). Then report the count in one sentence like: There are N open issues in exoulster/pi-async-subagents"
+gh issue list -R exoulster/pi-better-subagents --state open --json number --jq length
+It prints the number of open issues (0 means none — a valid answer, not an error). Then report the count in one sentence like: There are N open issues in exoulster/pi-better-subagents"
 rc=$?
 
 require_finished "gh issue list" "$ID" "$rc"
@@ -40,4 +40,4 @@ echo "  -----------------------"
 # Assert the subagent ran gh and reported a concrete open-issue count for the
 # repo (count is left open-ended — it changes as issues open/close).
 assert_contains "ran gh and reported issue status for the repo" "$ans" \
-    "issue" "[0-9]" "pi-async-subagents|exoulster"
+    "issue" "[0-9]" "pi-better-subagents|exoulster"

@@ -1,4 +1,4 @@
-# pi-async-subagents
+# pi-better-subagents
 
 Claude Code-style async subagents for [pi](https://github.com/earendil-works/pi-coding-agent).
 
@@ -88,7 +88,7 @@ the cap is rejected until a running one finishes.
 
 ## Design choices (MVP)
 
-- Runtime lives outside any repo, under `$TMPDIR/pi-async-subagents/`
+- Runtime lives outside any repo, under `$TMPDIR/pi-better-subagents/`
   (`runs/<id>/` holds `output.log`, `prompt.md`, `meta.json`; `sessions/` holds
   child session state). The `meta.json` sidecar is authoritative, so `list` /
   `output` / `result` survive turns, `/reload`, and pi restarts.
@@ -106,10 +106,10 @@ the cap is rejected until a running one finishes.
 Symlink the project into pi's auto-discovered extensions dir:
 
 ```bash
-ln -sfn "$PWD" ~/.pi/agent/extensions/pi-async-subagents
+ln -sfn "$PWD" ~/.pi/agent/extensions/pi-better-subagents
 ```
 
-Then `/reload` (or restart pi). It appears as `pi-async-subagents`.
+Then `/reload` (or restart pi). It appears as `pi-better-subagents`.
 
 > Do **not** add it to `settings.json`'s `extensions` array — a live pi session
 > rewrites that file on its own saves and drops hand-added entries. Auto-discovery
