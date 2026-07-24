@@ -1,5 +1,5 @@
 /**
- * pi-async-subagents — Claude Code-style async subagents for pi.
+ * pi-better-subagents — Claude Code-style async subagents for pi.
  *
  * Core semantic: launching a subagent IS the deliverable. `subagent_spawn`
  * starts a detached `pi -p` child and returns immediately with a run id; the

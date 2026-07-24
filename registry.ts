@@ -40,7 +40,7 @@ export interface RunMeta {
 
 /** Root runtime dir, deliberately OUTSIDE any repo. */
 export function baseDir(): string {
-    return join(tmpdir(), "pi-async-subagents");
+    return join(tmpdir(), "pi-better-subagents");
 }
 export function sessionsDir(): string {
     return join(baseDir(), "sessions");

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for pi-async-subagents integration tests.
+# Shared helpers for pi-better-subagents integration tests.
 #
 # These run the SAME child invocation `subagent_spawn` builds in index.ts
 # (pi -p --mode json, tool allowlist, subagent-tool denylist, positional
@@ -11,7 +11,7 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUNTIME="${TMPDIR:-/tmp}/pi-async-subagents-tests"
+RUNTIME="${TMPDIR:-/tmp}/pi-better-subagents-tests"
 SESS="$RUNTIME/sessions"
 
 # Overridable knobs.
