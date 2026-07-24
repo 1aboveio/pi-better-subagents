@@ -15,7 +15,12 @@ import { dirname, join } from "node:path";
 export interface SubagentConfig {
     defaultModel?: string | null;
     defaultTools?: string | null;
+    /** Max subagents allowed to run at once. */
+    maxConcurrent?: number | null;
 }
+
+/** Concurrency cap when config.json sets none. */
+export const DEFAULT_MAX_CONCURRENT = 4;
 
 /** Built-in default tool set when config.json sets nothing. */
 export const SAFE_DEFAULT_TOOLS = "read, bash, edit, write, web_search, web_fetch";

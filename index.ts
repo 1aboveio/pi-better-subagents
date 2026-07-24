@@ -17,7 +17,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "@earendil-works/pi-ai";
 import { spawnDetached, killProcessTree } from "./spawn.ts";
 import { parseRun, type Usage } from "./parse.ts";
-import { loadConfig, normalizeTools, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
+import { loadConfig, normalizeTools, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { buildSandboxCommand, sandboxSupported } from "./sandbox.ts";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -43,9 +43,6 @@ const SUBAGENT_TOOLS = [
     "subagent_stop",
     "subagent_result",
 ];
-
-/** Refuse to run more than this many subagents at once. */
-const MAX_CONCURRENT = 8;
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
@@ -260,12 +257,13 @@ export default function (pi: ExtensionAPI) {
             };
             if (p.prompt.trim() === "") throw new Error("prompt is empty.");
 
+            const cfg = loadConfig();
+            const maxConcurrent = cfg.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
             const running = listMetas().filter((m) => effectiveStatus(m) === "running").length;
-            if (running >= MAX_CONCURRENT) {
-                throw new Error(`Max concurrent subagents (${MAX_CONCURRENT}) reached. Stop or let some finish first.`);
+            if (running >= maxConcurrent) {
+                throw new Error(`Max concurrent subagents (${maxConcurrent}) reached. Stop or let some finish first.`);
             }
 
-            const cfg = loadConfig();
             const id = nextRunId();
             // Sandbox is ON by default (simple rule: reads free, writes confined
             // to the working dir). Opt out with sandbox:false. sandbox_dir moves

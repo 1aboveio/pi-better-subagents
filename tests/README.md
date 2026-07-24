@@ -7,8 +7,8 @@ stdin, positional prompt) and parses the result the way `parse.ts` does.
 
 | Test | Proves |
 |------|--------|
-| `test_web_fetch.sh` | An extension-provided tool (`web_fetch`) works in a scoped child: fetch `www.1above.io`, report a word count. |
-| `test_gh_issues.sh` | A `bash`-scoped child can drive an external CLI: `gh issue list -R 1aboveio/.github`. |
+| `test_web_fetch.sh` | An extension-provided tool (`web_fetch`) works in a scoped child: fetch `github.com/exoulster/pi-async-subagents`, report a word count. |
+| `test_gh_issues.sh` | A `bash`-scoped child can drive an external CLI: `gh issue list -R exoulster/pi-async-subagents`. |
 | `test_env_inherit.sh` | The foreground environment (e.g. `GH_TOKEN`) reaches the subagent **through the OS sandbox** — the hardening test for credential passing. |
 
 ## Run
