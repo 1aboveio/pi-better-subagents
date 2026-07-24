@@ -47,12 +47,14 @@ launch is the result · completion posts back · the foreground never blocks
 - **Process isolation.** Each run is a `detached` + `unref`'d `pi -p` process.
   Its context can't clog the parent, its crash can't corrupt parent state, and
   its output is durable in a log file.
-- **Result posts back on completion.** When the child exits, the parsed result is
-  sent with `pi.sendMessage(..., { deliverAs: "followUp", triggerTurn: true })` —
+- **Completion triggers a turn that fetches the result.** When the child exits,
+  a lightweight trigger is sent with `pi.sendMessage(..., { deliverAs: "followUp", triggerTurn: true })` —
   it waits until the foreground agent has no pending tool calls (never cutting
-  into work mid-stream), then surfaces the answer. The run itself never blocks the
-  foreground; the single nudge happens only at the end. Prefer `callback:false`
-  to finish quietly and read the result on demand via `subagent_result`.
+  into work mid-stream), then the model calls `subagent_result` and presents the
+  result. The actual result is never embedded in the trigger to avoid double-display.
+  The run itself never blocks the foreground; the single nudge happens only at
+  the end. Prefer `callback:false` to finish quietly and read the result on demand
+  via `subagent_result`.
 - **The prompt guidelines forbid polling.** The foreground agent is told, in the
   tool guidelines, that spawning is done and it must not loop on `output`/`result`
   or sleep to wait.
@@ -155,6 +157,6 @@ Near-term:
 - Guarantee subagent autonomy — verify/deny any child→parent supervision
   back-channel so a child can never block on the parent ([#1](https://github.com/exoulster/pi-better-subagents/issues/1)).
 - Make `callback:true` a lightweight trigger instead of embedding the full result
-  twice ([#2](https://github.com/exoulster/pi-better-subagents/issues/2)).
+  twice ([#2](https://github.com/exoulster/pi-better-subagents/issues/2)) — **done**.
 - Named agent-definition files (per-agent system prompt + tool allowlist) and
   chain/parallel orchestration.
