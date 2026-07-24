@@ -1,0 +1,110 @@
+name: Integration
+
+# Step 2 of the two-step merge queue: real pi + model + gh integration tests.
+# Runs ONLY on Mergify merge-queue branches (and manual dispatch for debugging).
+# Required by merge_conditions in .mergify.yml as check-success = integration.
+#
+# Secrets:
+#   MINIMAX_API_KEY — MiniMax China API key (same as local $MINIMAX_API_KEY)
+#   GH_TOKEN        — optional; falls back to github.token for same-repo gh calls
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  PI_SUBAGENT_TEST_MODEL: minimax-cn/MiniMax-M3
+  PI_SUBAGENT_TEST_TIMEOUT: "300"
+  # Prefer a dedicated PAT if set; otherwise the job token is enough for
+  # `gh issue list` against this same repository.
+  GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+  # Local models.json uses $MINIMAX_API_KEY for the minimax-cn provider.
+  # Builtin pi also accepts MINIMAX_CN_API_KEY for provider minimax-cn.
+  MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+  MINIMAX_CN_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+
+jobs:
+  integration:
+    name: integration
+    # Queue-only: Mergify opens PRs whose head branch is mergify/merge-queue/…
+    # workflow_dispatch keeps a manual escape hatch for debugging.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || startsWith(github.head_ref, 'mergify/merge-queue/')
+    # macOS until https://github.com/exoulster/pi-better-subagents/issues/5
+    # (Linux sandbox). The queue suite itself (web_fetch + gh) does not need
+    # sandbox-exec, but staying on macOS keeps full run_all.sh available later.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pi CLI
+        run: npm install -g @earendil-works/pi-coding-agent
+
+      - name: Install local MiniMax-CN model config
+        # Mirrors ~/.pi/agent/models.json minimax-cn provider so
+        # PI_SUBAGENT_TEST_MODEL=minimax-cn/MiniMax-M3 resolves the same way
+        # as a local pi session (api.minimaxi.com + $MINIMAX_API_KEY).
+        run: |
+          set -euo pipefail
+          if [ -z "${MINIMAX_API_KEY:-}" ]; then
+            echo "::error::MINIMAX_API_KEY secret is not set"
+            exit 1
+          fi
+          mkdir -p "$HOME/.pi/agent"
+          # Write via python so the JSON is never YAML-indent-polluted.
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          cfg = {
+              "providers": {
+                  "minimax-cn": {
+                      "apiKey": "$MINIMAX_API_KEY",
+                      "api": "anthropic-messages",
+                      "baseUrl": "https://api.minimaxi.com/anthropic",
+                      "models": [{
+                          "id": "MiniMax-M3",
+                          "name": "MiniMax-M3",
+                          "reasoning": True,
+                          "input": ["text", "image"],
+                          "contextWindow": 512000,
+                          "maxTokens": 128000,
+                          "cost": {
+                              "input": 0.6,
+                              "output": 2.4,
+                              "cacheRead": 0.12,
+                              "cacheWrite": 0,
+                          },
+                      }],
+                  }
+              }
+          }
+          path = Path.home() / ".pi" / "agent" / "models.json"
+          path.write_text(json.dumps(cfg, indent=2) + "\n")
+          print(f"wrote {path}")
+          PY
+          pi --list-models 2>&1 | grep -E 'minimax-cn|MiniMax-M3' || {
+            echo "::error::minimax-cn/MiniMax-M3 did not register"
+            exit 1
+          }
+
+      - name: Verify tooling
+        run: |
+          pi --version
+          gh --version
+          gh api user --jq .login
+          # Smoke: gh can see this repo's issues (the integration test does this via the child).
+          gh issue list -R "${{ github.repository }}" --state open --json number --jq length
+
+      - name: Run queue integration tests
+        run: bash tests/run_queue.sh

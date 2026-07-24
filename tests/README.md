@@ -14,19 +14,35 @@ stdin, positional prompt) and parses the result the way `parse.ts` does.
 ## Run
 
 ```bash
-tests/run_all.sh                                   # both, default model
-PI_SUBAGENT_TEST_MODEL=xiaomi/mimo-v2.5-pro tests/run_all.sh
-PI_SUBAGENT_TEST_TIMEOUT=400 tests/run_all.sh      # slower models
-tests/test_web_fetch.sh                            # one test
+tests/run_all.sh                                      # full local suite (3 tests)
+tests/run_queue.sh                                    # merge-queue suite (web_fetch + gh)
+PI_SUBAGENT_TEST_MODEL=minimax-cn/MiniMax-M3 tests/run_queue.sh
+PI_SUBAGENT_TEST_TIMEOUT=400 tests/run_all.sh         # slower models
+tests/test_web_fetch.sh                               # one test
 ```
+
+Default model is `minimax-cn/MiniMax-M3` (same as local `~/.pi/agent/models.json`).
+Needs `MINIMAX_API_KEY` in the environment.
+
+## CI / merge queue
+
+Two-step gate (see `.mergify.yml`):
+
+| Step | Workflow | When | Check name |
+|------|----------|------|------------|
+| 1. PR gate | `.github/workflows/ci.yml` | every PR | `ci` |
+| 2. Queue gate | `.github/workflows/integration-tests.yml` | `mergify/merge-queue/*` only | `integration` |
+
+`run_queue.sh` is what step 2 runs. `test_env_inherit.sh` stays local-only until
+Linux sandbox support lands ([#5](https://github.com/exoulster/pi-better-subagents/issues/5)).
 
 ## What to expect
 
 These make **real model calls and hit the network**, and `test_gh_issues.sh`
-needs `gh` authenticated (`gh auth status`). They are smoke tests, not CI — a run
-can be **cut off** if the model is slow. A cut-off run reports `INCOMPLETE`
-(exit 2), which is distinct from a wrong answer (`FAIL`, exit 1) and a pass
-(exit 0). On `INCOMPLETE`, just re-run or raise `PI_SUBAGENT_TEST_TIMEOUT`.
+needs `gh` authenticated (`gh auth status` or `GH_TOKEN`). A run can be **cut
+off** if the model is slow. A cut-off run reports `INCOMPLETE` (exit 2), which is
+distinct from a wrong answer (`FAIL`, exit 1) and a pass (exit 0). On
+`INCOMPLETE`, just re-run or raise `PI_SUBAGENT_TEST_TIMEOUT`.
 
 Exit codes: `0` pass · `1` finished but assertion failed · `2` incomplete (flake).
 

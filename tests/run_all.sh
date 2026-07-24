@@ -3,7 +3,7 @@
 #
 # Usage:
 #   tests/run_all.sh
-#   PI_SUBAGENT_TEST_MODEL=xiaomi/mimo-v2.5-pro tests/run_all.sh
+#   PI_SUBAGENT_TEST_MODEL=minimax-cn/MiniMax-M3 tests/run_all.sh
 #   PI_SUBAGENT_TEST_TIMEOUT=300 tests/run_all.sh
 #
 # Note: these make real model calls and hit the network (and require `gh` auth),

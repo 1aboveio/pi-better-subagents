@@ -15,7 +15,7 @@ RUNTIME="${TMPDIR:-/tmp}/pi-better-subagents-tests"
 SESS="$RUNTIME/sessions"
 
 # Overridable knobs.
-CHILD_MODEL="${PI_SUBAGENT_TEST_MODEL:-xiaomi/mimo-v2.5-pro}"
+CHILD_MODEL="${PI_SUBAGENT_TEST_MODEL:-minimax-cn/MiniMax-M3}"
 TEST_TIMEOUT="${PI_SUBAGENT_TEST_TIMEOUT:-300}"
 
 SUBAGENT_DENY="subagent_spawn,subagent_list,subagent_output,subagent_result,subagent_stop"
