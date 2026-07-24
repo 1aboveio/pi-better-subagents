@@ -7,7 +7,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { formatCallbackTrigger, formatCallbackQuiet } from '../completion.mjs';
+import { formatCallbackTrigger, formatCallbackQuiet, buildCompletionDelivery } from '../completion.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -158,113 +158,137 @@ describe('formatCallbackQuiet', () => {
     });
 });
 
-// Integration test: verify index.ts uses the right formatters and settings
+// ── buildCompletionDelivery behavior tests ────────────────────────────────────
+describe('buildCompletionDelivery', () => {
+    it('callback:true delivery content never contains resultText sentinel', () => {
+        const sentinel = 'UNIQUE_FULL_RESULT_BODY_' + 'x'.repeat(200);
+        const d = buildCompletionDelivery({
+            id: 'sa_test_1', label: 't', verdict: '✓ completed', stat: '1s',
+            callback: true, resultText: sentinel, tools: 'read,bash',
+        });
+        assert.equal(d.options.deliverAs, 'followUp');
+        assert.equal(d.options.triggerTurn, true);
+        assert.ok(d.content.includes('subagent_result'));
+        assert.ok(d.content.includes('sa_test_1'));
+        assert.ok(!d.content.includes(sentinel), 'resultText must not appear in callback content');
+        assert.ok(!d.content.includes('--- result ---'), 'no --- result --- in callback content');
+    });
+
+    it('callback:false delivery is quiet and excludes resultText', () => {
+        const sentinel = 'QUIET_SENTINEL_RESULT_BODY_zzz';
+        const d = buildCompletionDelivery({
+            id: 'sa_test_2', label: 't', verdict: '✓ completed', stat: '1s',
+            callback: false, resultText: sentinel,
+        });
+        assert.equal(d.options.deliverAs, 'nextTurn');
+        assert.ok(!d.options.triggerTurn, 'triggerTurn must not be true on quiet path');
+        assert.ok(!d.content.includes(sentinel), 'resultText must not appear in quiet content');
+        assert.ok(
+            d.content.includes('subagent_result') || d.content.includes('NOT auto-posted'),
+            'quiet content must reference subagent_result or indicate not auto-posted'
+        );
+    });
+
+    it('callback:true excludes resultText even when resultText is huge', () => {
+        const huge = 'RESULT_PART_' + 'BIG'.repeat(500);
+        const d = buildCompletionDelivery({
+            id: 'sa_huge', label: 'agent', verdict: '✓ done', stat: '2m',
+            callback: true, resultText: huge, tools: 'read',
+        });
+        assert.ok(!d.content.includes('RESULT_PART'), 'huge resultText must not leak into content');
+    });
+
+    it('callback:true uses formatCallbackTrigger output (id, label, verdict, stat, tools)', () => {
+        const d = buildCompletionDelivery({
+            id: 'sa_format', label: 'reviewer (sa_format)', verdict: '✓ completed',
+            stat: '30s · 800 tok · $0.0012', tools: 'read,bash',
+            callback: true, resultText: 'THE ACTUAL RESULT SHOULD NOT APPEAR',
+        });
+        assert.ok(d.content.includes('reviewer (sa_format)'));
+        assert.ok(d.content.includes('✓ completed'));
+        assert.ok(d.content.includes('30s'));
+        assert.ok(d.content.includes('read,bash'));
+        assert.ok(d.content.includes('sa_format'));
+        assert.ok(!d.content.includes('THE ACTUAL RESULT SHOULD NOT APPEAR'));
+    });
+
+    it('index.ts calls buildCompletionDelivery in finalizeRun', async () => {
+        const { readFileSync } = await import('node:fs');
+        const indexSource = readFileSync(
+            path.resolve(__dirname, '..', 'index.ts'),
+            'utf8'
+        );
+        assert.ok(
+            indexSource.includes('buildCompletionDelivery'),
+            'index.ts must call buildCompletionDelivery in finalizeRun'
+        );
+        // The old inline if/else formatters must not be called directly in finalizeRun.
+        // The replace is safe: formatCallbackTrigger/Quiet are still imported for
+        // buildCompletionDelivery itself.
+    });
+});
+
+// Integration test: verify index.ts wires finalizeRun to buildCompletionDelivery
 describe('index.ts integration', async () => {
     const indexPath = path.resolve(__dirname, '..', 'index.ts');
     const indexSource = await import('node:fs').then(fs =>
         fs.promises.readFile(indexPath, 'utf8')
     );
 
-    // ── Extract the callback=true block ─────────────────────────────────────────
-    // Use a lazy quantifier so the block is bounded by its own `}`.
-    // If the regex finds nothing, assert.ok fires immediately — no silent pass.
-    const callbackMatch = indexSource.match(/if \(callback\) \{([\s\S]*?)\n\}/);
-    assert.ok(callbackMatch, 'must find callback block in index.ts (if (callback) { ... })');
-    const callbackBlock = callbackMatch[0]; // includes the "if (callback) {" header
-    const callbackBody = callbackMatch[1];  // inner statements only
-
-    it('callback path should use formatCallbackTrigger with triggerTurn:true', () => {
-        // Verify formatCallbackTrigger is imported
+    it('index.ts imports buildCompletionDelivery from completion.ts', () => {
         assert.ok(
-            indexSource.includes('formatCallbackTrigger'),
-            'index.ts should import formatCallbackTrigger'
-        );
-
-        // Verify callback=true path uses triggerTurn:true
-        assert.ok(
-            indexSource.includes('triggerTurn: true') || indexSource.includes('triggerTurn:true'),
-            'callback=true path should set triggerTurn: true'
-        );
-
-        // Verify callback=true path uses deliverAs:followUp
-        assert.ok(
-            indexSource.includes('deliverAs: "followUp"') || indexSource.includes("deliverAs: 'followUp'"),
-            'callback=true path should use deliverAs: followUp'
+            indexSource.includes('buildCompletionDelivery'),
+            'index.ts must import buildCompletionDelivery from completion.ts'
         );
     });
 
-    it('callback=false path should use formatCallbackQuiet with deliverAs:nextTurn', () => {
-        // Verify callback=false path uses formatCallbackQuiet
+    it('finalizeRun calls buildCompletionDelivery', () => {
+        // Verify finalizeRun calls buildCompletionDelivery (the single assembly point)
         assert.ok(
-            indexSource.includes('formatCallbackQuiet'),
-            'index.ts should import formatCallbackQuiet'
-        );
-
-        // Verify callback=false path uses deliverAs:nextTurn
-        assert.ok(
-            indexSource.includes('deliverAs: "nextTurn"') || indexSource.includes("deliverAs: 'nextTurn'"),
-            'callback=false path should use deliverAs: nextTurn'
+            indexSource.includes('buildCompletionDelivery({'),
+            'finalizeRun must call buildCompletionDelivery({ ... })'
         );
     });
 
-    // ── F2 stronger guards — scoped to the callback block ──────────────────────
-    it('callback block: content assignment must use formatCallbackTrigger(', () => {
-        // Assert the content field references the formatter — not a bare template.
+    it('finalizeRun passes resultText: r.finalText || r.lastActivity || "" to buildCompletionDelivery', () => {
         assert.ok(
-            /content:\s*formatCallbackTrigger\s*\(/.test(callbackBody),
-            'callback block content must use formatCallbackTrigger( … ) in index.ts'
+            indexSource.includes('resultText: r.finalText') ||
+            indexSource.includes('resultText: r.lastActivity'),
+            'finalizeRun must pass resultText from r.finalText or r.lastActivity'
         );
     });
 
-    it('callback block: sendMessage options must have triggerTurn:true and deliverAs:followUp', () => {
-        // Both flags must be present in the callback block.
+    it('finalizeRun calls pi.sendMessage with delivery.content and delivery.options', () => {
         assert.ok(
-            callbackBody.includes('triggerTurn: true') || callbackBody.includes('triggerTurn:true'),
-            'callback block sendMessage options must set triggerTurn: true'
+            indexSource.includes('content: delivery.content'),
+            'pi.sendMessage must use delivery.content'
         );
         assert.ok(
-            callbackBody.includes('deliverAs: "followUp"') || callbackBody.includes("deliverAs: 'followUp'"),
-            'callback block sendMessage options must set deliverAs: followUp'
-        );
-    });
-
-    it('callback block must NOT embed "--- result ---" in message content', () => {
-        assert.ok(
-            !callbackBlock.includes('--- result ---'),
-            'callback block should not embed "--- result ---" in message. ' +
-            'The result is fetched via subagent_result, not embedded in the trigger.'
+            indexSource.includes('delivery.options'),
+            'pi.sendMessage must use delivery.options'
         );
     });
 
-    it('callback block must NOT interpolate result/finalText/lastActivity into content', () => {
-        // Reject raw result interpolation — e.g. `${result}` or `$result`.
+    it('formatCallbackTrigger and formatCallbackQuiet are still exported (used by buildCompletionDelivery)', () => {
         assert.ok(
-            !callbackBody.includes('${result}') && !callbackBody.includes('$result'),
-            'callback block must not interpolate ${result} into message content'
-        );
-
-        // Reject r.finalText appearing anywhere in the callback body.
-        // This catches an in-memory mutation from:
-        //   content: formatCallbackTrigger(…)  →  content: `completion ${r.finalText}`
-        assert.ok(
-            !callbackBody.includes('r.finalText') && !callbackBody.includes('result.finalText'),
-            'callback block must not pass r.finalText into message content'
-        );
-
-        // Reject r.lastActivity — another regression vector for embed.
-        assert.ok(
-            !callbackBody.includes('r.lastActivity') && !callbackBody.includes('result.lastActivity'),
-            'callback block must not pass r.lastActivity into message content'
+            indexSource.includes('formatCallbackTrigger') && indexSource.includes('formatCallbackQuiet'),
+            'Both formatters must still be exported/imported (buildCompletionDelivery uses them)'
         );
     });
 
-    it('callback block content must NOT be a bare template literal (no formatCallbackTrigger)', () => {
-        // If someone strips formatCallbackTrigger and replaces with a backtick literal,
-        // the content: formatCallbackTrigger( pattern disappears.
+    it('finalizeRun does NOT embed "--- result ---" or ${result} in sendMessage', () => {
+        // The old patterns must not appear in the finalization path anymore.
         assert.ok(
-            /content:\s*formatCallbackTrigger\s*\(/.test(callbackBody),
-            'callback block content must still use formatCallbackTrigger — ' +
-            'a bare template literal is not acceptable'
+            !indexSource.includes('--- result ---'),
+            'finalizeRun must not embed "--- result ---" in sendMessage'
         );
+        // Check the finalizeRun function body for any template literal with result
+        const finalizeMatch = indexSource.match(/function finalizeRun\([\s\S]*?^\}/m);
+        if (finalizeMatch) {
+            assert.ok(
+                !finalizeMatch[0].includes('${result}'),
+                'finalizeRun must not interpolate ${result} into message content'
+            );
+        }
     });
 });

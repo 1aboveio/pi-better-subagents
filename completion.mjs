@@ -54,3 +54,43 @@ export function formatCallbackQuiet(p) {
         `Read it with subagent_result id="${p.id}" when wanted.`
     );
 }
+
+/**
+ * Build the completion delivery from run outcome.
+ *
+ * This is the SINGLE place where sendMessage content and options are assembled.
+ * `resultText` is accepted so callers can pass it without tests breaking, but
+ * it is NEVER placed into `content` for either branch — the actual result is
+ * always fetched via subagent_result, not embedded in the trigger/quiet message.
+ *
+ * @param p.id       - Run id
+ * @param p.label    - Human-readable label
+ * @param p.verdict  - Status line (e.g. "✓ completed")
+ * @param p.stat     - Statistics line (e.g. "45s · 1.2k tok")
+ * @param p.tools    - Optional tools list
+ * @param p.callback - Whether to trigger a turn (true) or be quiet (false)
+ * @param p.resultText - The parsed final answer; MUST NOT appear in content
+ */
+export function buildCompletionDelivery(p) {
+    if (p.callback) {
+        return {
+            content: formatCallbackTrigger({
+                id: p.id,
+                label: p.label,
+                verdict: p.verdict,
+                stat: p.stat,
+                tools: p.tools,
+            }),
+            options: { deliverAs: "followUp", triggerTurn: true },
+        };
+    }
+    return {
+        content: formatCallbackQuiet({
+            id: p.id,
+            label: p.label,
+            verdict: p.verdict,
+            stat: p.stat,
+        }),
+        options: { deliverAs: "nextTurn" },
+    };
+}

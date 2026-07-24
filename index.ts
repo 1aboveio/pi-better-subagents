@@ -33,7 +33,7 @@ import {
     effectiveStatus,
     type RunMeta,
 } from "./registry.ts";
-import { formatCallbackTrigger, formatCallbackQuiet } from "./completion.ts";
+import { formatCallbackTrigger, formatCallbackQuiet, buildCompletionDelivery } from "./completion.ts";
 
 /** The tools this extension registers — excluded from children by default so a
  *  subagent cannot recursively spawn more subagents unless explicitly allowed. */
@@ -176,34 +176,18 @@ function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: 
     try { ctx.ui.notify(`Subagent ${label} ${verdict} · ${stat}`, meta.status === "completed" ? "info" : "warning"); } catch { /* ignore */ }
 
     const callback = meta.callback !== false; // default: trigger completion
-    if (callback) {
-        // Callback ON: lightweight trigger message. `followUp` waits until the
-        // foreground agent has no pending tool calls (never cutting into work
-        // in progress); `triggerTurn` invokes a turn when idle so the model
-        // calls subagent_result and presents the result. The actual result is
-        // NEVER embedded here to avoid double-display. The foreground is never
-        // BLOCKED while the run happens — this is a single callback at completion.
-        pi.sendMessage(
-            {
-                customType: "subagent-complete",
-                content: formatCallbackTrigger({ id, label, verdict, stat, tools }),
-                display: true,
-            },
-            { deliverAs: "followUp", triggerTurn: true },
-        );
-    } else {
-        // Callback OFF: do NOT trigger a turn. Leave a quiet note so the agent
-        // knows it finished; the result is fetched on demand via subagent_result.
-        // `nextTurn` delivers at the user's next prompt without interrupting.
-        pi.sendMessage(
-            {
-                customType: "subagent-complete",
-                content: formatCallbackQuiet({ id, label, verdict, stat }),
-                display: true,
-            },
-            { deliverAs: "nextTurn" },
-        );
-    }
+    // buildCompletionDelivery is the single place sendMessage content/options are
+    // assembled. resultText is accepted here so callers/tests can pass it without
+    // breaking, but it is NEVER put into content — the result lives in subagent_result.
+    const delivery = buildCompletionDelivery({
+        id, label, verdict, stat, tools,
+        callback,
+        resultText: r.finalText || r.lastActivity || "",
+    });
+    pi.sendMessage(
+        { customType: "subagent-complete", content: delivery.content, display: true },
+        delivery.options,
+    );
 }
 
 export default function (pi: ExtensionAPI) {
