@@ -33,6 +33,7 @@ import {
     effectiveStatus,
     type RunMeta,
 } from "./registry.ts";
+import { formatCallbackTrigger, formatCallbackQuiet, buildCompletionDelivery } from "./completion.ts";
 
 /** The tools this extension registers — excluded from children by default so a
  *  subagent cannot recursively spawn more subagents unless explicitly allowed. */
@@ -165,10 +166,7 @@ function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: 
     const r = parseRun(id);
     const spend = fmtSpend(r.usage);
     const stat = `${el}${spend ? ` · ${spend}` : ""}`;
-    const tools = r.toolCalls.length ? `\ntools used: ${r.toolCalls.join(", ")}` : "";
-    // The actual result to post back — parsed final answer, or the last activity
-    // if the child ended mid-work without a clean final message.
-    const result = r.finalText || r.lastActivity || "(the subagent produced no textual output)";
+    const tools = r.toolCalls.length ? r.toolCalls.join(", ") : undefined;
 
     // A finished run is no longer in the widget; redraw (and stop the ticker if
     // it was the last one).
@@ -177,43 +175,19 @@ function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: 
     // Best-effort human toast. ctx may be stale by now; never let it throw.
     try { ctx.ui.notify(`Subagent ${label} ${verdict} · ${stat}`, meta.status === "completed" ? "info" : "warning"); } catch { /* ignore */ }
 
-    const callback = meta.callback !== false; // default: post the result back
-    if (callback) {
-        // Callback ON: hand the RESULT to the main-session model so it ingests it
-        // and takes a turn. `followUp` waits until the foreground agent has no
-        // pending tool calls (never cutting into work in progress); `triggerTurn`
-        // invokes a turn when idle so the model acts on the result instead of it
-        // sitting unseen. The foreground is never BLOCKED while the run happens —
-        // this is a single callback at completion, not a wait.
-        pi.sendMessage(
-            {
-                customType: "subagent-complete",
-                content:
-                    `A background subagent you launched has returned.\n` +
-                    `subagent: ${label} · ${verdict} · ${stat}${tools ? ` ·${tools.replace(/\n/, " ")}` : ""}\n\n` +
-                    `--- result ---\n${result}\n--- end result ---\n\n` +
-                    `Ingest this result and continue: use it to advance the task you delegated, ` +
-                    `or present it to the user if that was the point. Full output remains available via subagent_result id="${id}".`,
-                display: true,
-            },
-            { deliverAs: "followUp", triggerTurn: true },
-        );
-    } else {
-        // Callback OFF: do NOT post the result or trigger a turn. Leave a quiet
-        // note so the agent knows it finished; the result is fetched on demand
-        // via subagent_result. `nextTurn` delivers at the user's next prompt
-        // without interrupting or forcing a turn.
-        pi.sendMessage(
-            {
-                customType: "subagent-complete",
-                content:
-                    `Background subagent ${label} ${verdict} · ${stat}. ` +
-                    `Result NOT auto-posted (callback:false). Read it with subagent_result id="${id}" when wanted.`,
-                display: true,
-            },
-            { deliverAs: "nextTurn" },
-        );
-    }
+    const callback = meta.callback !== false; // default: trigger completion
+    // buildCompletionDelivery is the single place sendMessage content/options are
+    // assembled. resultText is accepted here so callers/tests can pass it without
+    // breaking, but it is NEVER put into content — the result lives in subagent_result.
+    const delivery = buildCompletionDelivery({
+        id, label, verdict, stat, tools,
+        callback,
+        resultText: r.finalText || r.lastActivity || "",
+    });
+    pi.sendMessage(
+        { customType: "subagent-complete", content: delivery.content, display: true },
+        delivery.options,
+    );
 }
 
 export default function (pi: ExtensionAPI) {
@@ -231,7 +205,7 @@ export default function (pi: ExtensionAPI) {
             "After subagent_spawn, do NOT call subagent_output or subagent_result in a loop to wait for the result, and do NOT sleep. The run completes on its own and reports back on the next turn.",
             "Only call subagent_result / subagent_output when the user explicitly asks how a run is going or for its result.",
             "A subagent has the full tool set by default, including extension tools like web_fetch. Use the tools param to restrict it to an allowlist (e.g. tools='read,bash,web_fetch'), or clean:true for a hermetic built-ins-only child. Pick a model with the model param (e.g. 'xai/grok-4.5').",
-            "By default the subagent is sandboxed (writes confined to its working dir, reads and network open) and posts its result back here on completion. Pass sandbox:false to let it write anywhere, or callback:false to have it finish quietly (then read it with subagent_result).",
+            "By default the subagent is sandboxed (writes confined to its working dir, reads and network open) and triggers completion here on finish. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
         ],
         parameters: Type.Object({
             prompt: Type.String({ description: "The task for the subagent. This is the only context it gets — be self-contained." }),
@@ -242,7 +216,7 @@ export default function (pi: ExtensionAPI) {
             clean: Type.Optional(Type.Boolean({ description: "Run a hermetic child with NO global extensions (only built-ins: read, bash, edit, write). Default false — extensions load so web_fetch, MCP, and extension-provided model auth (e.g. xai) work." })),
             sandbox: Type.Optional(Type.Boolean({ description: "Default TRUE (macOS): kernel-confine the child's file WRITES to its working dir — reads and network stay open, but it cannot write outside, whatever it runs. Set false to allow writes anywhere." })),
             sandbox_dir: Type.Optional(Type.String({ description: "Confine writes to (and run the child in) this directory instead of the working dir. Created if missing." })),
-            callback: Type.Optional(Type.Boolean({ description: "Default TRUE: on completion, post the result back into this session and let the model act on it. Set false to finish quietly — the result is then read on demand via subagent_result." })),
+            callback: Type.Optional(Type.Boolean({ description: "Default TRUE: on completion, trigger a turn that calls subagent_result and presents the result. Set false to finish quietly — the result is then read on demand via subagent_result." })),
             cwd: Type.Optional(Type.String({ description: "Working directory (default: current)." })),
             approve: Type.Optional(Type.Boolean({ description: "Trust project-local files in the child (default: false; headless runs cannot prompt for trust)." })),
             allow_nested: Type.Optional(Type.Boolean({ description: "Only relevant with load_extensions: allow the child to spawn its own subagents (default: false)." })),
