@@ -82,7 +82,9 @@ temp dirs, and `/dev` so pi can function; everything else (your home, the repo,
 Precedence, highest first: the per-call `tools` param → `config.json`
 `defaultTools` → a built-in default (`read, bash, edit, write, web_search,
 web_fetch`; just `read, bash` in a `clean` child). `exclude_tools` subtracts on
-top. `config.json` (next to the extension) also sets `defaultModel`.
+top. `config.json` (next to the extension) also sets `defaultModel` and
+`maxConcurrent` — how many subagents may run at once (default 4). A spawn past
+the cap is rejected until a running one finishes.
 
 ## Design choices (MVP)
 
