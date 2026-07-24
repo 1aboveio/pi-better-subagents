@@ -77,6 +77,11 @@ function fmtSpend(u: Usage): string {
     return `${fmtTokens(u.total)} tok (↑${fmtTokens(u.input)} ↓${fmtTokens(u.output)}) · ${fmtCost(u.costUSD)}`;
 }
 
+/** Compact model label for the widget: drop the provider prefix. */
+function shortModel(model?: string): string {
+    return model ? (model.split("/").pop() ?? model) : "?";
+}
+
 // ---- live status widget (Claude Code-style) ------------------------------
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -105,7 +110,7 @@ function renderWidget(): void {
         const spend = fmtSpend(r.usage);
         const tool = r.toolCalls.length ? ` · ${r.toolCalls[r.toolCalls.length - 1]}` : "";
         const nm = m.name ?? m.id;
-        lines.push(`  ${spin} ${nm}  ${el}${tool}${spend ? `  ${spend}` : ""}`);
+        lines.push(`  ${spin} ${nm} · ${shortModel(m.model)}  ${el}${tool}${spend ? `  ${spend}` : ""}`);
     }
     try { ctx.ui.setWidget("subagents", lines); } catch { /* ignore */ }
 }
@@ -381,7 +386,7 @@ export default function (pi: ExtensionAPI) {
                 const spend = fmtSpend(parseRun(m.id).usage);
                 const nm = m.name ? `${m.name} ` : "";
                 const stat = `${el}${spend ? ` · ${spend}` : ""}`;
-                return `• ${nm}${m.id}  [${st}]  ${stat}  ${m.model ?? ""}\n    ${m.promptPreview.replace(/\s+/g, " ").slice(0, 100)}`;
+                return `• ${nm}${m.id}  [${st}]  ${m.model ?? "?"}  ${stat}\n    ${m.promptPreview.replace(/\s+/g, " ").slice(0, 100)}`;
             });
             return text(rows.join("\n"));
         },
