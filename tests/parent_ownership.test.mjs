@@ -23,4 +23,12 @@ describe("parent ownership", () => {
     const metasById = new Map([[ownRunningMeta.id, ownRunningMeta], [foreignRunningMeta.id, foreignRunningMeta]]);
     assert.equal(metasById.get("sa_foreign"), foreignRunningMeta);
   });
+
+  it("default list filter keeps only this parent; all:true keeps foreign pids", () => {
+    const metas = [ownRunningMeta, foreignRunningMeta];
+    const def = metas.filter((meta) => ownedByThisParent(meta, thisParentPid));
+    const all = metas; // all:true path
+    assert.deepEqual(def.map((m) => m.id), ["sa_owned"]);
+    assert.deepEqual(all.map((m) => m.id), ["sa_owned", "sa_foreign"]);
+  });
 });

@@ -31,6 +31,7 @@ import {
     readMeta,
     listMetas,
     effectiveStatus,
+    ownedByThisParent,
     type RunMeta,
 } from "./registry.ts";
 import { formatCallbackTrigger, formatCallbackQuiet, buildCompletionDelivery } from "./completion.ts";
