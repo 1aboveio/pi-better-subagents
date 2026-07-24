@@ -31,6 +31,7 @@ import {
     readMeta,
     listMetas,
     effectiveStatus,
+    ownedByThisParent,
     type RunMeta,
 } from "./registry.ts";
 import { formatCallbackTrigger, formatCallbackQuiet, buildCompletionDelivery } from "./completion.ts";
@@ -95,7 +96,7 @@ let frame = 0;
 function renderWidget(): void {
     const ctx = uiCtx;
     if (!ctx || !ctx.hasUI) return;
-    const running = listMetas().filter((m) => effectiveStatus(m) === "running");
+    const running = listMetas().filter((m) => ownedByThisParent(m) && effectiveStatus(m) === "running");
     if (running.length === 0) {
         try { ctx.ui.setWidget("subagents", []); } catch { /* ignore */ }
         stopTicker();
@@ -238,7 +239,7 @@ export default function (pi: ExtensionAPI) {
 
             const cfg = loadConfig();
             const maxConcurrent = cfg.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
-            const running = listMetas().filter((m) => effectiveStatus(m) === "running").length;
+            const running = listMetas().filter((m) => ownedByThisParent(m) && effectiveStatus(m) === "running").length;
             if (running >= maxConcurrent) {
                 throw new Error(`Max concurrent subagents (${maxConcurrent}) reached. Stop or let some finish first.`);
             }
@@ -347,12 +348,15 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
         name: "subagent_list",
         label: "List Subagents",
-        description: "List background subagent runs (running and finished) with status and metadata. Non-blocking.",
+        description: "List background subagent runs (running and finished) with status and metadata. Non-blocking. Default: this parent process only. Pass all:true for machine-global.",
         promptSnippet: "List background subagent runs and their status",
-        parameters: Type.Object({}),
-        async execute() {
-            const metas = listMetas();
-            if (metas.length === 0) return text("No subagent runs.");
+        parameters: Type.Object({
+            all: Type.Optional(Type.Boolean({ description: "If true, list every run on this machine. Default false = only runs spawned by this pi process." })),
+        }),
+        async execute(_toolCallId, params) {
+            const p = (params ?? {}) as { all?: boolean };
+            const metas = p.all ? listMetas() : listMetas().filter((m) => ownedByThisParent(m));
+            if (metas.length === 0) return text(p.all ? "No subagent runs." : "No subagent runs for this parent process.");
             const now = Date.now();
             const rows = metas.map((m) => {
                 const st = effectiveStatus(m);
@@ -463,7 +467,7 @@ export default function (pi: ExtensionAPI) {
     // "no background resources at load" rule.
     pi.on("session_start", async (_event, ctx) => {
         uiCtx = ctx;
-        if (listMetas().some((m) => effectiveStatus(m) === "running")) ensureTicker();
+        if (listMetas().some((m) => ownedByThisParent(m) && effectiveStatus(m) === "running")) ensureTicker();
         else renderWidget();
     });
 
