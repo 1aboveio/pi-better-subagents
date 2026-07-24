@@ -31,3 +31,6 @@ jobs:
               || node -e "require('fs').readFileSync(process.argv[1],'utf8')" "$f"
             echo "ok  $f"
           done
+
+      - name: Unit tests
+        run: node --test tests/*.test.mjs
