@@ -165,6 +165,14 @@ describe('index.ts integration', async () => {
         fs.promises.readFile(indexPath, 'utf8')
     );
 
+    // ── Extract the callback=true block ─────────────────────────────────────────
+    // Use a lazy quantifier so the block is bounded by its own `}`.
+    // If the regex finds nothing, assert.ok fires immediately — no silent pass.
+    const callbackMatch = indexSource.match(/if \(callback\) \{([\s\S]*?)\n\}/);
+    assert.ok(callbackMatch, 'must find callback block in index.ts (if (callback) { ... })');
+    const callbackBlock = callbackMatch[0]; // includes the "if (callback) {" header
+    const callbackBody = callbackMatch[1];  // inner statements only
+
     it('callback path should use formatCallbackTrigger with triggerTurn:true', () => {
         // Verify formatCallbackTrigger is imported
         assert.ok(
@@ -199,25 +207,64 @@ describe('index.ts integration', async () => {
         );
     });
 
-    it('callback path should NOT embed "--- result ---" in message content', () => {
-        // Find the callback=true block — FAIL if regex finds nothing (no silent pass).
-        const callbackMatch = indexSource.match(/if \(callback\) \{[\s\S]*?(?=else|function finalizeRun)/);
-        assert.ok(callbackMatch, 'must find callback block in index.ts');
-        const callbackBlock = callbackMatch[0];
+    // ── F2 stronger guards — scoped to the callback block ──────────────────────
+    it('callback block: content assignment must use formatCallbackTrigger(', () => {
+        // Assert the content field references the formatter — not a bare template.
+        assert.ok(
+            /content:\s*formatCallbackTrigger\s*\(/.test(callbackBody),
+            'callback block content must use formatCallbackTrigger( … ) in index.ts'
+        );
+    });
+
+    it('callback block: sendMessage options must have triggerTurn:true and deliverAs:followUp', () => {
+        // Both flags must be present in the callback block.
+        assert.ok(
+            callbackBody.includes('triggerTurn: true') || callbackBody.includes('triggerTurn:true'),
+            'callback block sendMessage options must set triggerTurn: true'
+        );
+        assert.ok(
+            callbackBody.includes('deliverAs: "followUp"') || callbackBody.includes("deliverAs: 'followUp'"),
+            'callback block sendMessage options must set deliverAs: followUp'
+        );
+    });
+
+    it('callback block must NOT embed "--- result ---" in message content', () => {
         assert.ok(
             !callbackBlock.includes('--- result ---'),
-            'callback=true block should not embed "--- result ---" in message. ' +
+            'callback block should not embed "--- result ---" in message. ' +
             'The result is fetched via subagent_result, not embedded in the trigger.'
         );
-        // F2: assert r.finalText / result variable is NOT interpolated into sendMessage
-        // content near formatCallbackTrigger / sendMessage in the callback branch.
+    });
+
+    it('callback block must NOT interpolate result/finalText/lastActivity into content', () => {
+        // Reject raw result interpolation — e.g. `${result}` or `$result`.
         assert.ok(
-            !callbackBlock.includes('${result}') && !callbackBlock.includes('$result'),
-            'callback block must not interpolate a result variable into message content'
+            !callbackBody.includes('${result}') && !callbackBody.includes('$result'),
+            'callback block must not interpolate ${result} into message content'
         );
+
+        // Reject r.finalText appearing anywhere in the callback body.
+        // This catches an in-memory mutation from:
+        //   content: formatCallbackTrigger(…)  →  content: `completion ${r.finalText}`
         assert.ok(
-            !callbackBlock.includes('finalText') || !callbackBlock.includes('formatCallbackTrigger'),
-            'callback block must not pass finalText into the message sent with formatCallbackTrigger'
+            !callbackBody.includes('r.finalText') && !callbackBody.includes('result.finalText'),
+            'callback block must not pass r.finalText into message content'
+        );
+
+        // Reject r.lastActivity — another regression vector for embed.
+        assert.ok(
+            !callbackBody.includes('r.lastActivity') && !callbackBody.includes('result.lastActivity'),
+            'callback block must not pass r.lastActivity into message content'
+        );
+    });
+
+    it('callback block content must NOT be a bare template literal (no formatCallbackTrigger)', () => {
+        // If someone strips formatCallbackTrigger and replaces with a backtick literal,
+        // the content: formatCallbackTrigger( pattern disappears.
+        assert.ok(
+            /content:\s*formatCallbackTrigger\s*\(/.test(callbackBody),
+            'callback block content must still use formatCallbackTrigger — ' +
+            'a bare template literal is not acceptable'
         );
     });
 });
