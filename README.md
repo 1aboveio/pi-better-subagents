@@ -9,17 +9,17 @@ what it needs, and reports back when it's done. No blocking waits, no
 back-channel for it to stall on, no unbounded blast radius.
 
 ```
-launch is the result · completion posts back · the foreground never blocks
+launch is the result · completion triggers fetch · the foreground never blocks
 ```
 
 ## Principles
 
 - **The foreground never blocks.** Launching a subagent *is* the deliverable —
   `subagent_spawn` starts a detached `pi -p` child and returns immediately,
-  leaving the session free for the human. When the child finishes, its result
-  posts back into the session (as a `followUp`), never cutting into work in
-  progress. The foreground is nudged once, at completion — never on a wait/poll
-  loop.
+  leaving the session free for the human. When the child finishes, it sends a
+  lightweight trigger; the foreground calls `subagent_result` and presents the
+  result (as a `followUp`, never cutting into work in progress). The foreground
+  is nudged once, at completion — never on a wait/poll loop.
 - **Subagents are autonomous; communication is one-way (parent → child).** The
   parent front-loads everything the child needs into the spawn; the child runs to
   completion and **returns a result**. There is no mid-task child→parent blocking

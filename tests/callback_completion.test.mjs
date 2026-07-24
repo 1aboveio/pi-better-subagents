@@ -5,7 +5,11 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { formatCallbackTrigger, formatCallbackQuiet } from '../completion.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 describe('formatCallbackTrigger', () => {
     it('must NOT contain "--- result ---" marker', () => {
@@ -63,6 +67,49 @@ describe('formatCallbackTrigger', () => {
         );
     });
 
+    // F2 regression guard: if someone re-adds an optional `result` field
+    // to formatCallbackTrigger's input type and embeds it, this test FAILS.
+    // The sentinel proves unknown fields must be ignored.
+    it('must NOT embed a `result` field even if caller passes one', () => {
+        const sentinel = 'UNIQUE_SENTINEL_xyz789_RESULT_PAYLOAD';
+        // Object.assign simulates `{ ...p, result }` spread at the call site.
+        // If a future refactor re-adds `p.result` to the formatter template,
+        // this fails.
+        const result = formatCallbackTrigger(
+            Object.assign(
+                {},
+                { id: 'abc123', label: 'test-agent', verdict: '✓ completed', stat: '45s' },
+                { result: sentinel }
+            )
+        );
+        assert.ok(
+            !result.includes(sentinel),
+            `Trigger must not embed a caller-supplied result field. Got:\n${result}`
+        );
+    });
+
+    // F2 regression guard: pure "build message" path — if formatter accidentally
+    // re-introduces result embedding (e.g. via template literal `${result}`),
+    // this test FAILS because the output would contain the sentinel.
+    it('must not embed result when called through a spread-object call pattern', () => {
+        const sentinel = 'SENTINEL_RESULT_embed_FAIL_xyz';
+        const callArgs = {
+            id: 'abc123',
+            label: 'test-agent',
+            verdict: '✓ completed',
+            stat: '45s',
+        };
+        // Object.assign simulates `{ ...p, result }` spread at the call site.
+        // If someone re-adds `${p.result}` to the formatter template, this fails.
+        const result = formatCallbackTrigger(
+            Object.assign({}, callArgs, { result: sentinel })
+        );
+        assert.ok(
+            !result.includes(sentinel),
+            `Trigger must not embed result from spread-object call. Got:\n${result}`
+        );
+    });
+
     it('may include label, verdict, and stat', () => {
         const result = formatCallbackTrigger({
             id: 'abc123',
@@ -113,8 +160,9 @@ describe('formatCallbackQuiet', () => {
 
 // Integration test: verify index.ts uses the right formatters and settings
 describe('index.ts integration', async () => {
-    const indexSource = await import('node:fs').then(fs => 
-        fs.promises.readFile('/Users/exoulster/projects/pi-better-subagents/index.ts', 'utf8')
+    const indexPath = path.resolve(__dirname, '..', 'index.ts');
+    const indexSource = await import('node:fs').then(fs =>
+        fs.promises.readFile(indexPath, 'utf8')
     );
 
     it('callback path should use formatCallbackTrigger with triggerTurn:true', () => {
@@ -123,13 +171,13 @@ describe('index.ts integration', async () => {
             indexSource.includes('formatCallbackTrigger'),
             'index.ts should import formatCallbackTrigger'
         );
-        
+
         // Verify callback=true path uses triggerTurn:true
         assert.ok(
             indexSource.includes('triggerTurn: true') || indexSource.includes('triggerTurn:true'),
             'callback=true path should set triggerTurn: true'
         );
-        
+
         // Verify callback=true path uses deliverAs:followUp
         assert.ok(
             indexSource.includes('deliverAs: "followUp"') || indexSource.includes("deliverAs: 'followUp'"),
@@ -143,24 +191,33 @@ describe('index.ts integration', async () => {
             indexSource.includes('formatCallbackQuiet'),
             'index.ts should import formatCallbackQuiet'
         );
-        
+
         // Verify callback=false path uses deliverAs:nextTurn
         assert.ok(
             indexSource.includes('deliverAs: "nextTurn"') || indexSource.includes("deliverAs: 'nextTurn'"),
             'callback=false path should use deliverAs: nextTurn'
         );
     });
-    
+
     it('callback path should NOT embed "--- result ---" in message content', () => {
-        // Find the callback=true block
+        // Find the callback=true block — FAIL if regex finds nothing (no silent pass).
         const callbackMatch = indexSource.match(/if \(callback\) \{[\s\S]*?(?=else|function finalizeRun)/);
-        if (callbackMatch) {
-            const callbackBlock = callbackMatch[0];
-            assert.ok(
-                !callbackBlock.includes('--- result ---'),
-                'callback=true block should not embed "--- result ---" in message. ' +
-                'The result is fetched via subagent_result, not embedded in the trigger.'
-            );
-        }
+        assert.ok(callbackMatch, 'must find callback block in index.ts');
+        const callbackBlock = callbackMatch[0];
+        assert.ok(
+            !callbackBlock.includes('--- result ---'),
+            'callback=true block should not embed "--- result ---" in message. ' +
+            'The result is fetched via subagent_result, not embedded in the trigger.'
+        );
+        // F2: assert r.finalText / result variable is NOT interpolated into sendMessage
+        // content near formatCallbackTrigger / sendMessage in the callback branch.
+        assert.ok(
+            !callbackBlock.includes('${result}') && !callbackBlock.includes('$result'),
+            'callback block must not interpolate a result variable into message content'
+        );
+        assert.ok(
+            !callbackBlock.includes('finalText') || !callbackBlock.includes('formatCallbackTrigger'),
+            'callback block must not pass finalText into the message sent with formatCallbackTrigger'
+        );
     });
 });
