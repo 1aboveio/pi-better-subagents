@@ -128,6 +128,11 @@ reported per-request cost.
 - The child gets **only** the explicit prompt — no silent parent-context bleed.
 - `--approve` is **off by default** (headless runs can't prompt for trust).
 
+
+## Parent-process scoping
+
+The live widget, default `subagent_list`, concurrency cap, and `session_start` ticker only include runs this pi process spawned (`spawnPid === process.pid`). The on-disk registry stays machine-global for durability. Pass `subagent_list all:true` for a global view. Id-based `subagent_result` / `subagent_output` / `subagent_stop` still resolve any run id (cross-session recovery).
+
 ## Install
 
 Symlink the project into pi's auto-discovered extensions dir:
