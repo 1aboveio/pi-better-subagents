@@ -51,6 +51,16 @@ jobs:
       - name: Install pi CLI
         run: npm install -g @earendil-works/pi-coding-agent
 
+      - name: Install web-tools extension (provides web_fetch)
+        # web_fetch is NOT a pi built-in — it comes from this package (present
+        # locally via settings.json). Install it so the web_fetch scenario has
+        # the tool it needs; a bare pi install only has read/bash/edit/write.
+        run: |
+          set -euo pipefail
+          pi install npm:@juicesharp/rpiv-web-tools
+          pi list 2>&1 | grep -qi 'rpiv-web-tools' \
+            || { echo "::error::rpiv-web-tools not installed"; exit 1; }
+
       - name: Install local MiniMax-CN model config
         # Mirrors ~/.pi/agent/models.json minimax-cn provider so
         # PI_SUBAGENT_TEST_MODEL=minimax-cn/MiniMax-M3 resolves the same way
