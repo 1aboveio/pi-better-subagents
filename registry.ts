@@ -1,0 +1,104 @@
+/**
+ * Run registry — durable metadata for each spawned subagent.
+ *
+ * The authoritative record for every run is a `meta.json` sidecar on disk, so
+ * `list` / `output` / `result` keep working across foreground turns, `/reload`,
+ * and even a full pi restart. In-memory state holds only the live exit handlers
+ * for runs this process spawned.
+ */
+
+import { mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { processExists } from "./spawn.ts";
+
+/** Terminal + live statuses as recorded on disk. */
+export type RunStatus = "running" | "completed" | "failed" | "killed";
+
+export interface RunMeta {
+    id: string;
+    name?: string;
+    status: RunStatus;
+    /** Child process PID. */
+    pid: number;
+    /** PID of the pi process that launched this run (for cross-restart ownership). */
+    spawnPid: number;
+    model?: string;
+    cwd: string;
+    /** First ~200 chars of the task prompt, for listings. */
+    promptPreview: string;
+    startedAt: number;
+    endedAt?: number;
+    exitCode?: number | null;
+    logPath: string;
+    sessionId: string;
+    /** Writable dir the child is OS-sandboxed to, if any. */
+    sandbox?: string;
+    /** Whether completion posts the result back to the main session (default true). */
+    callback?: boolean;
+}
+
+/** Root runtime dir, deliberately OUTSIDE any repo. */
+export function baseDir(): string {
+    return join(tmpdir(), "pi-async-subagents");
+}
+export function sessionsDir(): string {
+    return join(baseDir(), "sessions");
+}
+export function runDir(id: string): string {
+    return join(baseDir(), "runs", id);
+}
+export function logPathFor(id: string): string {
+    return join(runDir(id), "output.log");
+}
+export function promptPathFor(id: string): string {
+    return join(runDir(id), "prompt.md");
+}
+function metaPathFor(id: string): string {
+    return join(runDir(id), "meta.json");
+}
+
+let seq = 0;
+/** Monotonic, readable, collision-free run id: `sa_<base36-time>_<seq>`. */
+export function nextRunId(): string {
+    seq += 1;
+    return `sa_${Date.now().toString(36)}_${seq}`;
+}
+
+export function writeMeta(meta: RunMeta): void {
+    mkdirSync(runDir(meta.id), { recursive: true });
+    writeFileSync(metaPathFor(meta.id), JSON.stringify(meta, null, 2));
+}
+
+export function readMeta(id: string): RunMeta | undefined {
+    try {
+        return JSON.parse(readFileSync(metaPathFor(id), "utf-8")) as RunMeta;
+    } catch {
+        return undefined;
+    }
+}
+
+/** All runs, newest first. */
+export function listMetas(): RunMeta[] {
+    let ids: string[];
+    try {
+        ids = readdirSync(join(baseDir(), "runs"));
+    } catch {
+        return [];
+    }
+    return ids
+        .map(readMeta)
+        .filter((m): m is RunMeta => m !== undefined)
+        .sort((a, b) => b.startedAt - a.startedAt);
+}
+
+/**
+ * Reconcile the recorded status with reality for display. A run marked
+ * "running" whose PID is no longer alive exited without our handler firing
+ * (foreground pi was closed / restarted) — surface that as "exited".
+ */
+export function effectiveStatus(meta: RunMeta): RunStatus | "exited" {
+    if (meta.status !== "running") return meta.status;
+    if (processExists(meta.pid)) return "running";
+    return "exited";
+}
