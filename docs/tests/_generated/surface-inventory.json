@@ -1,0 +1,40 @@
+{
+  "generatedAt": "2026-07-25T00:00:00.000Z",
+  "surfaces": [
+    {
+      "id": "widget.render",
+      "kind": "service",
+      "class": "read",
+      "path": "widget.mjs",
+      "reachable": true
+    },
+    {
+      "id": "widget.clear",
+      "kind": "service",
+      "class": "mutation",
+      "path": "widget.mjs",
+      "reachable": true
+    },
+    {
+      "id": "widget.dirty-check",
+      "kind": "service",
+      "class": "read",
+      "path": "widget.mjs",
+      "reachable": true
+    },
+    {
+      "id": "widget.geometry",
+      "kind": "service",
+      "class": "read",
+      "path": "widget.mjs",
+      "reachable": true
+    },
+    {
+      "id": "widget.spend-cache",
+      "kind": "service",
+      "class": "read",
+      "path": "widget.mjs",
+      "reachable": true
+    }
+  ]
+}

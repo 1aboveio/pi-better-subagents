@@ -12,7 +12,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { spawnDetached, killProcessTree } from "./spawn.ts";
@@ -35,6 +35,16 @@ import {
     type RunMeta,
 } from "./registry.ts";
 import { formatCallbackTrigger, formatCallbackQuiet, buildCompletionDelivery } from "./completion.ts";
+import {
+    SPINNER,
+    TICK_MS,
+    WIDGET_CLEAR,
+    fmtElapsed,
+    fmtSpend,
+    buildWidgetLines,
+    nextWidgetAction,
+    isSpendCacheFresh,
+} from "./widget.ts";
 
 /** The tools this extension registers — excluded from children by default so a
  *  subagent cannot recursively spawn more subagents unless explicitly allowed. */
@@ -48,49 +58,76 @@ const SUBAGENT_TOOLS = [
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
-// ---- status formatting ---------------------------------------------------
-
-/** "45s" · "2m 03s" · "1h 04m". */
-function fmtElapsed(ms: number): string {
-    const s = Math.max(0, Math.round(ms / 1000));
-    if (s < 60) return `${s}s`;
-    const m = Math.floor(s / 60), rs = s % 60;
-    if (m < 60) return `${m}m ${String(rs).padStart(2, "0")}s`;
-    const h = Math.floor(m / 60), rm = m % 60;
-    return `${h}h ${String(rm).padStart(2, "0")}m`;
-}
-
-/** "412" · "1.2k" · "27.9k" · "1.4M". */
-function fmtTokens(n: number): string {
-    if (n < 1000) return String(n);
-    if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
-    return `${(n / 1_000_000).toFixed(1)}M`;
-}
-
-/** Compact USD cost, e.g. "$0.0057" or "$1.23". */
-function fmtCost(usd: number): string {
-    if (usd <= 0) return "$0";
-    return usd < 1 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
-}
-
-/** One-line spend summary, or "" when nothing has been spent yet. */
-function fmtSpend(u: Usage): string {
-    if (u.total <= 0 && u.costUSD <= 0) return "";
-    return `${fmtTokens(u.total)} tok (↑${fmtTokens(u.input)} ↓${fmtTokens(u.output)}) · ${fmtCost(u.costUSD)}`;
-}
-
-/** Compact model label for the widget: drop the provider prefix. */
-function shortModel(model?: string): string {
-    return model ? (model.split("/").pop() ?? model) : "?";
-}
-
 // ---- live status widget (Claude Code-style) ------------------------------
+//
+// Pi's setWidget(string[]) path disposes + rebuilds the above-editor component
+// tree on every call. Calling it at 1 Hz with a changing spinner/elapsed/spend
+// thrashes layout and makes neighboring ▶ job-* lines flicker. Mitigations:
+//   1. dirty-check via nextWidgetAction — skip identical frames
+//   2. fixed-width elapsed/tokens (buildWidgetLines) — stable geometry
+//   3. clear with undefined (WIDGET_CLEAR), never []
+//   4. cache spend/tool; only re-parseRun when log grows or TTL expires
+// Pure helpers live in widget.mjs / widget.ts so unit tests cover the contracts
+// without a live TUI.
 
-const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /** Freshest UI-bearing context, captured from session_start / tool calls. */
 let uiCtx: ExtensionContext | undefined;
 let ticker: ReturnType<typeof setInterval> | undefined;
 let frame = 0;
+/** Last lines successfully sent to setWidget (undefined ⇒ cleared / never set). */
+let lastWidgetLines: string[] | undefined;
+
+type SpendSnap = {
+    usage: Usage;
+    tool: string | null;
+    refreshedAt: number;
+    logSize: number;
+};
+/** Per-run spend/tool cache for the UI hot path. */
+const spendCache = new Map<string, SpendSnap>();
+
+function logSizeOf(id: string): number {
+    try {
+        return statSync(logPathFor(id)).size;
+    } catch {
+        return 0;
+    }
+}
+
+/** Refresh spend/tool for a run only when the cache is stale or the log grew. */
+function spendFor(id: string, now: number): { usage: Usage; tool: string | null } {
+    const logSize = logSizeOf(id);
+    const cached = spendCache.get(id);
+    if (isSpendCacheFresh(cached, now, logSize)) {
+        return { usage: cached!.usage, tool: cached!.tool };
+    }
+    const r = parseRun(id);
+    const snap: SpendSnap = {
+        usage: r.usage,
+        tool: r.toolCalls.length ? r.toolCalls[r.toolCalls.length - 1]! : null,
+        refreshedAt: now,
+        logSize,
+    };
+    spendCache.set(id, snap);
+    return { usage: snap.usage, tool: snap.tool };
+}
+
+function applyWidget(linesOrClear: string[] | typeof WIDGET_CLEAR): void {
+    const ctx = uiCtx;
+    if (!ctx || !ctx.hasUI) return;
+    const action = nextWidgetAction(
+        lastWidgetLines,
+        linesOrClear === undefined ? null : linesOrClear,
+    );
+    if (action.op === "skip") return;
+    if (action.op === "clear") {
+        try { ctx.ui.setWidget("subagents", WIDGET_CLEAR); } catch { /* ignore */ }
+        lastWidgetLines = undefined;
+        return;
+    }
+    try { ctx.ui.setWidget("subagents", action.lines); } catch { /* ignore */ }
+    lastWidgetLines = action.lines;
+}
 
 /** Redraw the running-subagents widget above the editor; clear it when idle. */
 function renderWidget(): void {
@@ -98,29 +135,33 @@ function renderWidget(): void {
     if (!ctx || !ctx.hasUI) return;
     const running = listMetas().filter((m) => ownedByThisParent(m) && effectiveStatus(m) === "running");
     if (running.length === 0) {
-        try { ctx.ui.setWidget("subagents", []); } catch { /* ignore */ }
+        applyWidget(WIDGET_CLEAR);
+        // Drop spend entries for runs that are no longer live so a restart
+        // does not show stale totals for a recycled id.
+        spendCache.clear();
         stopTicker();
         return;
     }
-    frame = (frame + 1) % SPINNER.length;
-    const spin = SPINNER[frame];
-    const now = Date.now();
-    const lines = [`Subagents · ${running.length} running`];
-    for (const m of running) {
-        const el = fmtElapsed(now - m.startedAt);
-        const r = parseRun(m.id);
-        const spend = fmtSpend(r.usage);
-        const tool = r.toolCalls.length ? ` · ${r.toolCalls[r.toolCalls.length - 1]}` : "";
-        const nm = m.name ?? m.id;
-        lines.push(`  ${spin} ${nm} · ${shortModel(m.model)}  ${el}${tool}${spend ? `  ${spend}` : ""}`);
+    // Keep cache entries only for currently-running ids.
+    const live = new Set(running.map((m) => m.id));
+    for (const id of spendCache.keys()) {
+        if (!live.has(id)) spendCache.delete(id);
     }
-    try { ctx.ui.setWidget("subagents", lines); } catch { /* ignore */ }
+    frame = (frame + 1) % SPINNER.length;
+    const now = Date.now();
+    const spendById: Record<string, { usage: Usage; tool: string | null }> = {};
+    for (const m of running) {
+        spendById[m.id] = spendFor(m.id, now);
+    }
+    // buildWidgetLines includes shortModel(m.model) — preserves #14 list-show-model.
+    const lines = buildWidgetLines({ running, frame, now, spendById });
+    applyWidget(lines);
 }
 
-/** Start the 1s redraw loop if a UI is present and it isn't already running. */
+/** Start the redraw loop if a UI is present and it isn't already running. */
 function ensureTicker(): void {
     if (ticker || !uiCtx?.hasUI) return;
-    ticker = setInterval(renderWidget, 1000);
+    ticker = setInterval(renderWidget, TICK_MS);
     ticker.unref?.(); // never keep the process alive on our account
     renderWidget();
 }
@@ -474,6 +515,8 @@ export default function (pi: ExtensionAPI) {
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (_event, ctx) => {
         stopTicker();
-        try { ctx.ui.setWidget("subagents", []); } catch { /* ignore */ }
+        spendCache.clear();
+        try { ctx.ui.setWidget("subagents", WIDGET_CLEAR); } catch { /* ignore */ }
+        lastWidgetLines = undefined;
     });
 }
