@@ -36,6 +36,10 @@ export interface RunMeta {
     sandbox?: string;
     /** Whether completion posts the result back to the main session (default true). */
     callback?: boolean;
+    /** Batch ID for runs launched via subagent_spawn_batch. */
+    batchId?: string;
+    /** Optional batch display name. */
+    batchName?: string;
 }
 
 /** Root runtime dir, deliberately OUTSIDE any repo. */

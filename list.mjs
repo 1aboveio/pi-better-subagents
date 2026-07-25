@@ -63,7 +63,10 @@ export function formatSubagentListRow(meta, p) {
     const spend = fmtSpend(usage);
     const name = meta.name ? `${meta.name} ` : "";
     const stat = `${elapsed}${spend ? ` · ${spend}` : ""}`;
-    return `• ${name}${meta.id}  [${status}]  ${meta.model ?? "?"}  ${stat}\n    ${promptPreview(meta)}`;
+    const batch = meta.batchId
+        ? `  [batch: ${meta.batchName ? `${meta.batchName} ` : ""}${meta.batchId}]`
+        : "";
+    return `• ${name}${meta.id}  [${status}]  ${meta.model ?? "?"}  ${stat}${batch}\n    ${promptPreview(meta)}`;
 }
 
 export function buildSubagentList(p) {

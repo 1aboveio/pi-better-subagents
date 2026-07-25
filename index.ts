@@ -36,6 +36,14 @@ import {
     ownedByThisParent,
     type RunMeta,
 } from "./registry.ts";
+import {
+    assignBatchJobNames,
+    formatBatchLaunchResponse,
+    mergeJobOptions,
+    nextBatchId,
+    planBatchLaunches,
+    validateBatchPlan,
+} from "./batch.mjs";
 import { formatCallbackTrigger, formatCallbackQuiet, buildCompletionDelivery } from "./completion.ts";
 import {
     SPINNER,
@@ -234,6 +242,125 @@ function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: 
 }
 
 export default function (pi: ExtensionAPI) {
+    type SpawnParams = {
+        prompt: string; name?: string; model?: string; tools?: string;
+        exclude_tools?: string; clean?: boolean; sandbox?: boolean;
+        sandbox_dir?: string; callback?: boolean; cwd?: string;
+        approve?: boolean; allow_nested?: boolean;
+    };
+
+    /**
+     * Shared internal spawn path used by both subagent_spawn and
+     * subagent_spawn_batch. Every launched job becomes a normal subagent run
+     * with its own run ID, process, log, metadata, callback, result/output/stop
+     * behavior, and sandboxing.
+     */
+    async function spawnSubagentRun(
+        ctx: ExtensionContext,
+        p: SpawnParams,
+        batchInfo?: { batchId: string; batchName?: string },
+    ): Promise<{
+        id: string;
+        meta: RunMeta;
+        spawned: SpawnResult;
+        runtime: string;
+        warn: string;
+        sandboxDir?: string;
+    }> {
+        const cfg = loadConfig();
+
+        const explicitSandbox = p.sandbox === true || typeof p.sandbox_dir === "string";
+        const sandboxEnabled = p.sandbox !== false; // default on
+        const cwd = p.sandbox_dir ?? p.cwd ?? ctx.cwd;
+        const requestedSandboxDir = sandboxEnabled ? (p.sandbox_dir ?? cwd) : undefined;
+        const model = p.model ?? cfg.defaultModel ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
+
+        mkdirSync(sessionsDir(), { recursive: true });
+        const id = nextRunId();
+        mkdirSync(runDir(id), { recursive: true });
+        if (requestedSandboxDir) mkdirSync(requestedSandboxDir, { recursive: true });
+        writeFileSync(promptPathFor(id), p.prompt);
+
+        const clean = p.clean === true;
+
+        let allow = normalizeTools(
+            p.tools ?? cfg.defaultTools ?? (clean ? SAFE_CLEAN_TOOLS : SAFE_DEFAULT_TOOLS),
+        );
+        if (p.allow_nested) {
+            const have = new Set(allow.split(","));
+            allow = [...allow.split(","), ...SUBAGENT_TOOLS.filter((t) => !have.has(t))]
+                .filter(Boolean).join(",");
+        }
+
+        const resolution = resolveExtensions({
+            tools: allow, model, clean, allowNested: p.allow_nested, config: cfg,
+        });
+        const { args: extArgs, missing } = extensionArgs(resolution, resolveExtensionPath);
+        if (missing.length) {
+            throw new Error(
+                `Subagent needs extension(s) that are not installed: ${missing.join(", ")}. ` +
+                `Install them, drop the tools that require them, or remove the mapping from config.json.`,
+            );
+        }
+
+        const excludes = new Set<string>();
+        if (p.exclude_tools) for (const t of p.exclude_tools.split(",")) if (t.trim()) excludes.add(t.trim());
+        if (!p.allow_nested && resolution.mode === "inherit") {
+            for (const t of SUBAGENT_TOOLS) excludes.add(t);
+        }
+
+        const args = [
+            "-p", "--mode", "json",
+            "--session-dir", sessionsDir(),
+            "--session-id", id,
+            ...extArgs,
+            ...(model ? ["--model", model] : []),
+            ...(allow ? ["--tools", allow] : []),
+            ...(excludes.size ? ["--exclude-tools", [...excludes].join(",")] : []),
+            ...(p.approve ? ["--approve"] : []),
+            p.prompt,
+        ];
+
+        const piBin = resolvePiBinary();
+        const sandboxCommand = requestedSandboxDir
+            ? maybeBuildSandboxCommand({
+                profilePath: join(runDir(id), "sandbox.sb"),
+                writableDir: requestedSandboxDir, home: homedir(), piBin, piArgs: args,
+            }, { sandboxEnabled, explicitSandbox })
+            : undefined;
+        const cmd = sandboxCommand ?? { file: piBin, fileArgs: args };
+        const sandboxDir = sandboxCommand ? requestedSandboxDir : undefined;
+
+        const spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id) });
+
+        const meta: RunMeta = {
+            id, name: p.name, status: "running",
+            pid: spawned.pid, spawnPid: process.pid, model, cwd,
+            promptPreview: p.prompt.slice(0, 200),
+            startedAt: Date.now(), logPath: logPathFor(id), sessionId: id,
+            sandbox: sandboxDir, callback: p.callback !== false,
+            ...batchInfo,
+        };
+        writeMeta(meta);
+
+        void spawned.exit.then((code) => finalizeRun(pi, ctx, id, code));
+
+        uiCtx = ctx;
+        ensureTicker();
+
+        const runtime = resolution.mode === "inherit"
+            ? `Runtime: ALL installed extensions (inheritExtensions) — mid-turn drain risk\n`
+            : resolution.specs.length
+                ? `Runtime: isolated · extensions ${resolution.specs.join(", ")}\n`
+                : `Runtime: isolated · built-in tools only\n`;
+        const warn = resolution.unmapped.length
+            ? `NOTE: no extension mapped for ${resolution.unmapped.join(", ")} — ` +
+              `${resolution.unmapped.length > 1 ? "these tools" : "this tool"} will NOT exist in the child. ` +
+              `Add a toolExtensions entry in config.json.\n`
+            : "";
+        return { id, meta, spawned, runtime, warn, sandboxDir };
+    }
+
     // ---- subagent_spawn -------------------------------------------------
     pi.registerTool({
         name: "subagent_spawn",
@@ -266,12 +393,7 @@ export default function (pi: ExtensionAPI) {
         }),
 
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-            const p = params as {
-                prompt: string; name?: string; model?: string; tools?: string;
-                exclude_tools?: string; clean?: boolean; sandbox?: boolean;
-                sandbox_dir?: string; callback?: boolean; cwd?: string;
-                approve?: boolean; allow_nested?: boolean;
-            };
+            const p = params as SpawnParams;
             if (p.prompt.trim() === "") throw new Error("prompt is empty.");
 
             const cfg = loadConfig();
@@ -281,133 +403,7 @@ export default function (pi: ExtensionAPI) {
                 throw new Error(`Max concurrent subagents (${maxConcurrent}) reached. Stop or let some finish first.`);
             }
 
-            const id = nextRunId();
-            // Sandbox is ON by default (simple rule: reads free, writes confined
-            // to the working dir). Opt out with sandbox:false. sandbox_dir moves
-            // the confinement + working dir elsewhere. Self-contained confinement
-            // via the OS — no dependency on any guardrails extension.
-            const explicitSandbox = p.sandbox === true || typeof p.sandbox_dir === "string";
-            const sandboxEnabled = p.sandbox !== false; // default on
-            const cwd = p.sandbox_dir ?? p.cwd ?? ctx.cwd;
-            const requestedSandboxDir = sandboxEnabled ? (p.sandbox_dir ?? cwd) : undefined;
-            // Model precedence: per-call > config default > inherit foreground.
-            const model = p.model ?? cfg.defaultModel ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
-
-            // The child gets ONLY the explicit prompt — no silent parent-context
-            // bleed. Bounded and deliberate, per the design's continuity rule.
-            mkdirSync(sessionsDir(), { recursive: true });
-            mkdirSync(runDir(id), { recursive: true });
-            if (requestedSandboxDir) mkdirSync(requestedSandboxDir, { recursive: true });
-            writeFileSync(promptPathFor(id), p.prompt);
-
-            // `clean:true` is a hermetic builtins-only child — now just the
-            // narrowest case of the same isolation mechanism below.
-            const clean = p.clean === true;
-
-            // Tool allowlist precedence: per-call > config default > safe default
-            // (built-ins-only when the child is hermetic, since extension tools
-            // like web_fetch don't exist there).
-            let allow = normalizeTools(
-                p.tools ?? cfg.defaultTools ?? (clean ? SAFE_CLEAN_TOOLS : SAFE_DEFAULT_TOOLS),
-            );
-            // Nesting needs BOTH our package loaded and its tools allowlisted;
-            // granting one without the other silently yields a child that cannot
-            // actually spawn. Add them here so allow_nested means what it says.
-            if (p.allow_nested) {
-                const have = new Set(allow.split(","));
-                allow = [...allow.split(","), ...SUBAGENT_TOOLS.filter((t) => !have.has(t))]
-                    .filter(Boolean).join(",");
-            }
-
-            // Which extension CODE loads in the child, DERIVED from the tool
-            // allowlist (issue #17). Children run `--no-extensions -e <needed>`:
-            // a package that backs no requested tool never loads, so it cannot
-            // override builtin `bash` or unref the event loop and drain the run
-            // mid-turn. This is the only mechanism pi offers for exclusion —
-            // there is no "load all except X" flag.
-            const resolution = resolveExtensions({
-                tools: allow, model, clean, allowNested: p.allow_nested, config: cfg,
-            });
-            const { args: extArgs, missing } = extensionArgs(resolution, resolveExtensionPath);
-            if (missing.length) {
-                throw new Error(
-                    `Subagent needs extension(s) that are not installed: ${missing.join(", ")}. ` +
-                    `Install them, drop the tools that require them, or remove the mapping from config.json.`,
-                );
-            }
-
-            const excludes = new Set<string>();
-            if (p.exclude_tools) for (const t of p.exclude_tools.split(",")) if (t.trim()) excludes.add(t.trim());
-            // Our own package only loads in the child when nesting is allowed,
-            // so recursion is prevented by NOT LOADING the tools rather than by
-            // denying them after the fact. Belt-and-braces for `inherit` mode,
-            // where every installed package (including this one) does load.
-            if (!p.allow_nested && resolution.mode === "inherit") {
-                for (const t of SUBAGENT_TOOLS) excludes.add(t);
-            }
-
-            const args = [
-                "-p", "--mode", "json",
-                "--session-dir", sessionsDir(),
-                "--session-id", id,
-                ...extArgs,
-                ...(model ? ["--model", model] : []),
-                ...(allow ? ["--tools", allow] : []),
-                ...(excludes.size ? ["--exclude-tools", [...excludes].join(",")] : []),
-                ...(p.approve ? ["--approve"] : []),
-                // Pass the task as a direct positional prompt, NOT `@file`: some
-                // models (e.g. xiaomi/mimo) treat an @-attached file as untrusted
-                // content and refuse to act on it. spawn() uses no shell, so the
-                // full prompt is safe as a single argv element. The prompt.md
-                // sidecar is kept only as a debugging record.
-                p.prompt,
-            ];
-
-            const piBin = resolvePiBinary();
-            // The policy helper degrades only when no backend was discovered. Once
-            // it selects bubblewrap or sandbox-exec, this exact wrapper is spawned
-            // and any runtime failure remains fail-closed (no direct retry).
-            const sandboxCommand = requestedSandboxDir
-                ? maybeBuildSandboxCommand({
-                    profilePath: join(runDir(id), "sandbox.sb"),
-                    writableDir: requestedSandboxDir, home: homedir(), piBin, piArgs: args,
-                }, { sandboxEnabled, explicitSandbox })
-                : undefined;
-            const cmd = sandboxCommand ?? { file: piBin, fileArgs: args };
-            const sandboxDir = sandboxCommand ? requestedSandboxDir : undefined;
-
-            const spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id) });
-
-            const meta: RunMeta = {
-                id, name: p.name, status: "running",
-                pid: spawned.pid, spawnPid: process.pid, model, cwd,
-                promptPreview: p.prompt.slice(0, 200),
-                startedAt: Date.now(), logPath: logPathFor(id), sessionId: id,
-                sandbox: sandboxDir, callback: p.callback !== false,
-            };
-            writeMeta(meta);
-
-            // Fire-and-forget: finalize + notify when the child exits. No await —
-            // the foreground turn returns now.
-            void spawned.exit.then((code) => finalizeRun(pi, ctx, id, code));
-
-            // Start the live status widget (elapsed + token spend, ticking).
-            uiCtx = ctx;
-            ensureTicker();
-
-            // Show what the child actually loaded. An unmapped tool is the one
-            // quiet failure left in this path: the child launches fine and the
-            // tool simply is not there, so name it at launch.
-            const runtime = resolution.mode === "inherit"
-                ? `Runtime: ALL installed extensions (inheritExtensions) — mid-turn drain risk\n`
-                : resolution.specs.length
-                    ? `Runtime: isolated · extensions ${resolution.specs.join(", ")}\n`
-                    : `Runtime: isolated · built-in tools only\n`;
-            const warn = resolution.unmapped.length
-                ? `NOTE: no extension mapped for ${resolution.unmapped.join(", ")} — ` +
-                  `${resolution.unmapped.length > 1 ? "these tools" : "this tool"} will NOT exist in the child. ` +
-                  `Add a toolExtensions entry in config.json.\n`
-                : "";
+            const { id, spawned, runtime, warn, sandboxDir } = await spawnSubagentRun(ctx, p);
             return text(
                 `Subagent launched: ${p.name ? `${p.name} ` : ""}id=${id} (pid ${spawned.pid}).\n` +
                 (p.callback === false
@@ -417,6 +413,91 @@ export default function (pi: ExtensionAPI) {
                 runtime + warn +
                 `Log: ${logPathFor(id)}`,
             );
+        },
+    });
+
+    // ---- subagent_spawn_batch -------------------------------------------
+    pi.registerTool({
+        name: "subagent_spawn_batch",
+        label: "Spawn Subagent Batch",
+        description:
+            "Launch several independent background pi subagents at once. Each job becomes a " +
+            "normal subagent run with its own run id, process, log, and metadata. " +
+            "'shared' options are applied to every job; per-job options override them.",
+        promptSnippet: "Launch a batch of background subagents at once",
+        promptGuidelines: [
+            "Use subagent_spawn_batch when you have several independent tasks to delegate. It returns immediately with a batch id and one run id per launched job.",
+            "Each job is a normal subagent run; use subagent_result / subagent_output / subagent_stop with the individual run ids just like subagent_spawn.",
+            "Do NOT poll for results. Each job reports back on its own when it finishes.",
+            "By default the whole batch is rejected if there is not enough capacity. Set onCapacity to 'launch-available' to launch as many as fit and report the rest as skipped.",
+        ],
+        parameters: Type.Object({
+            batchName: Type.Optional(Type.String({ description: "Optional display label for the batch." })),
+            shared: Type.Optional(Type.Object({
+                model: Type.Optional(Type.String({ description: "Model as provider/id (default: inherit foreground model)." })),
+                tools: Type.Optional(Type.String({ description: "Tool allowlist applied to every job." })),
+                exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist applied to every job." })),
+                sandbox: Type.Optional(Type.Boolean({ description: "Default TRUE: kernel-confine writes to the working dir." })),
+                sandbox_dir: Type.Optional(Type.String({ description: "Writable root for every job." })),
+                callback: Type.Optional(Type.Boolean({ description: "Default TRUE: post result back on completion." })),
+                clean: Type.Optional(Type.Boolean({ description: "Hermetic builtins-only child; no extensions load." })),
+                cwd: Type.Optional(Type.String({ description: "Working directory (default: current)." })),
+                approve: Type.Optional(Type.Boolean({ description: "Trust project-local files in children." })),
+                allow_nested: Type.Optional(Type.Boolean({ description: "Allow children to spawn their own subagents." })),
+            }, { description: "Options applied to every job; per-job values override these." })),
+            jobs: Type.Array(Type.Object({
+                prompt: Type.String({ description: "The task for this job." }),
+                name: Type.Optional(Type.String({ description: "Short label for this job." })),
+                model: Type.Optional(Type.String()),
+                tools: Type.Optional(Type.String()),
+                exclude_tools: Type.Optional(Type.String()),
+                sandbox: Type.Optional(Type.Boolean()),
+                sandbox_dir: Type.Optional(Type.String()),
+                callback: Type.Optional(Type.Boolean()),
+                clean: Type.Optional(Type.Boolean()),
+                cwd: Type.Optional(Type.String()),
+                approve: Type.Optional(Type.Boolean()),
+                allow_nested: Type.Optional(Type.Boolean()),
+            }, { description: "A single batch job." }), {
+                minItems: 1,
+                description: "One or more jobs to launch. Each must have a prompt.",
+            }),
+            onCapacity: Type.Optional(Type.String({ description: 'Capacity behavior: "reject" (default) or "launch-available".' })),
+        }),
+
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const p = params as {
+                batchName?: string;
+                shared?: Partial<SpawnParams>;
+                jobs: Array<Partial<SpawnParams> & { prompt: string }>;
+                onCapacity?: "reject" | "launch-available";
+            };
+
+            const cfg = loadConfig();
+            const maxConcurrent = cfg.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+            const running = listMetas().filter((m) => ownedByThisParent(m) && effectiveStatus(m) === "running").length;
+
+            validateBatchPlan({ shared: p.shared, jobs: p.jobs, onCapacity: p.onCapacity, config: cfg });
+            const plan = planBatchLaunches({
+                jobs: p.jobs,
+                runningCount: running,
+                maxConcurrent,
+                onCapacity: p.onCapacity,
+            });
+            const names = assignBatchJobNames(p.jobs);
+            const batchId = nextBatchId();
+
+            const launched: { name: string; id: string }[] = [];
+            for (const job of plan.toLaunch) {
+                const index = p.jobs.indexOf(job);
+                const merged = mergeJobOptions(p.shared, job);
+                const name = names[index];
+                const { id } = await spawnSubagentRun(ctx, { ...merged, name }, { batchId, batchName: p.batchName });
+                launched.push({ name, id });
+            }
+
+            const skipped = plan.skipped.map((job) => ({ name: names[p.jobs.indexOf(job)] }));
+            return text(formatBatchLaunchResponse({ batchId, batchName: p.batchName, launched, skipped }));
         },
     });
 
