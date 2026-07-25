@@ -52,4 +52,5 @@ jobs:
           set -euo pipefail
           bash tests/test_sandbox_applied.sh
           bash tests/test_sandbox_deny_outside.sh
+          bash tests/test_sandbox_wrapper_argv.sh
           node --test tests/sandbox_profile.test.mjs
