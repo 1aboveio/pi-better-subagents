@@ -1,0 +1,1 @@
+fix test: set git user.email/name in target clone before committing (CI runners have no global git identity)
