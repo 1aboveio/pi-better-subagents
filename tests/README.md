@@ -12,7 +12,8 @@ cannot drift from what ships.
 |------|--------|
 | `test_sandbox_applied.sh` | macOS: the same `sandbox-exec` profile subagents use is applied — writes **inside** `sandbox_dir` succeed (deterministic, no model). |
 | `test_sandbox_deny_outside.sh` | macOS: under that profile, writes **outside** `sandbox_dir` are denied and create no file (deterministic, no model). |
-| `sandbox_profile.test.mjs` | Unit: `sandbox.ts` emits deny-all-writes + allow `sandbox_dir` (and pi system paths). |
+| `sandbox_profile.test.mjs` | Unit: `sandbox.ts` retains the macOS profile and proves Linux builder selection, canonical workdir binding, small writable allowlist, and fail-closed policy. |
+| `linux_bubblewrap.integration.mjs` | Linux queue lane: real product-built bubblewrap children prove inside writes, outside and symlink denial, canonical aliases, outside reads, read-only `~/.pi`, host `/tmp`, `/dev/null`, and host-local HTTP. Missing `bwrap` fails this test. |
 | `test_web_fetch.sh` | An extension-provided tool (`web_fetch`) works in a scoped child: fetch the repo page, report a word count. |
 | `test_gh_issues.sh` | A `bash`-scoped child can drive an external CLI: `gh issue list` against this repo. |
 | `test_env_inherit.sh` | The foreground environment (e.g. `GH_TOKEN`) reaches the subagent **through the OS sandbox** — credential passing. |
@@ -28,6 +29,7 @@ PI_SUBAGENT_TEST_MODEL=minimax-cn/MiniMax-M3 tests/run_queue.sh
 PI_SUBAGENT_TEST_TIMEOUT=400 tests/run_all.sh         # slower models
 tests/test_sandbox_applied.sh                         # one test (macOS)
 tests/test_sandbox_deny_outside.sh                    # one test (macOS)
+node --test tests/linux_bubblewrap.integration.mjs    # required Linux bwrap boundary proof
 node --test tests/*.test.mjs                          # unit (incl. sandbox profile)
 ```
 
@@ -43,9 +45,11 @@ Two-step gate (see `.mergify.yml`):
 | 1. PR gate | `.github/workflows/ci.yml` | every PR | `ci` |
 | 2. Queue gate | `.github/workflows/integration-tests.yml` | `mergify/merge-queue/*` only | `integration` |
 
-`run_queue.sh` is what step 2 runs. It includes the two macOS sandbox security
-tests (they `SKIP` on non-macOS) plus web_fetch + gh. `test_env_inherit.sh`
-stays local-only (`run_all.sh`). Linux write-sandbox: [#5](https://github.com/exoulster/pi-better-subagents/issues/5).
+The Ubuntu queue lane first installs and probes `bwrap`, then runs
+`linux_bubblewrap.integration.mjs` as a required real-filesystem boundary test.
+It also runs the existing macOS sandbox scripts through `run_queue.sh`; those
+scripts retain their platform routing and macOS assertions. `test_env_inherit.sh`
+stays local-only (`run_all.sh`). Linux write-sandbox: [#5](https://github.com/1aboveio/pi-better-subagents/issues/5).
 
 ## What to expect
 
@@ -62,7 +66,13 @@ Exit codes: `0` pass · `1` finished but assertion failed · `2` incomplete (fla
 - **stdin must be closed** for the child. `pi -p --mode json` reads stdin as an
   event stream and hangs forever if it stays open; `lib.sh` runs the child with
   `< /dev/null`, mirroring how the extension spawns with stdin `"ignore"`.
-- Tests write only under `$TMPDIR/pi-better-subagents-tests/` — never the repo.
+- Shell integration tests write under `$TMPDIR/pi-better-subagents-tests`.
+  The Linux boundary test uses a temporary directory beneath the checkout so an
+  outside probe is not accidentally covered by the approved host `/tmp` mount;
+  it removes that directory after every run. It also creates a unique denied-write candidate beneath
+  `~/.pi`; it asserts that bubblewrap creates no such host file. Linux children
+  can read `~/.pi` but must keep writable pi state in their work directory or
+  host `/tmp`.
 - **`gh` needs `GH_TOKEN`.** `gh` authenticates via the macOS keychain by
   default; a spawned child touching the keychain can hang on a prompt it can't
   answer. `test_gh_issues.sh` exports `GH_TOKEN` (from `gh auth token`) to bypass

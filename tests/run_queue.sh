@@ -12,9 +12,10 @@
 # that exits 0 mid-turn and is reported as completed. Silent success is exactly
 # what a merge gate must not let back in, so it runs here, not just locally.
 #
-# test_env_inherit.sh stays local-only (run_all.sh) — env-through-sandbox is
-# covered there; queue keeps the two security asserts + network/gh smokes.
-# Sandbox tests SKIP cleanly on non-macOS (see issue #5 for Linux).
+# The workflow runs the required Linux real-bwrap boundary test before this
+# script. test_env_inherit.sh stays local-only (run_all.sh) — env-through-sandbox
+# is covered there; this script retains the existing macOS platform-routed
+# assertions plus the network/gh smokes.
 #
 # Usage:
 #   tests/run_queue.sh
