@@ -1,10 +1,10 @@
-# Mergify — two-step merge queue (manual enqueue).
+# Mergify — two-step merge queue (review-gated auto-enqueue).
 #
 # Step 1 (queue entry):  check-success = ci            — every PR
 # Step 2 (merge gate):   check-success = integration   — merge-queue branches only
 #
-# Enqueue: comment `@mergifyio queue` (or tick the checkbox).
-# `auto_merge_conditions` is OMITTED on purpose → manual enqueue only.
+# Enqueue: automatic after CI + review pass, or manually with
+# `@mergifyio queue` (or the queue checkbox).
 #
 # Docs: https://docs.mergify.com/merge-queue/two-step/
 # Validate:  mergify config validate
@@ -56,7 +56,14 @@ merge_queue:
 merge_protections_settings:
   reporting_method: check-runs
   post_comment: true
-  # auto_merge_conditions deliberately omitted → manual enqueue only.
+  # Auto-enqueue only ready, reviewed PRs with no open change request.
+  # Manual `@mergifyio queue` remains available for write collaborators.
+  auto_merge_conditions:
+    - base = main
+    - "-draft"
+    - "#approved-reviews-by >= 1"
+    - "#changes-requested-reviews-by = 0"
+    - *gate
 
 merge_protections:
   # Republish the PR gate as a stable Mergify check-run for the ruleset.
@@ -81,20 +88,22 @@ priority_rules:
     # rather than waiting for that batch's `integration` run to finish.
     allow_checks_interruption: true
 
-# Escape hatch 2: skip the queue entirely (break glass).
+# Escape hatch 2: skip queue integration, but retain preliminary CI.
 pull_request_rules:
-  - name: emergency merge — skips the queue, use only when the queue cannot run
+  - name: emergency merge — skips queue integration, retains preliminary CI
     conditions:
       - base = main
       - label = emergency-merge
       - -draft
+      - *gate
     actions:
       merge:
         method: merge
       comment:
         message: >-
           Merged via the `emergency-merge` label — this bypassed the merge queue
-          and its CI run. Please confirm the branch is healthy.
+          integration run after preliminary CI passed. Please confirm the branch
+          is healthy.
 
 commands_restrictions:
   queue:
