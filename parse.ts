@@ -38,6 +38,8 @@ export interface Usage {
 
 const DEFAULT_PARSE_TAIL_BYTES = 32 * 1024 * 1024; // 32 MiB
 const DEFAULT_RAW_TAIL_BYTES = 256 * 1024; // 256 KiB
+const COHERENCE_SCAN_CHUNK_BYTES = 64 * 1024; // 64 KiB
+const MAX_COHERENCE_EVENT_PREFIX_BYTES = 64 * 1024; // 64 KiB
 
 function envBytes(name: string, fallback: number): number {
     const raw = process.env[name];
@@ -155,6 +157,149 @@ function messageText(msg: Msg | undefined): string {
     return c.filter((b) => b?.type === "text" && typeof b.text === "string").map((b) => b.text).join("").trim();
 }
 
+export interface UnmatchedToolCall {
+    /** Child tool-call id when the event stream provides one. */
+    id?: string;
+    /** Child tool name, retained for human diagnostics. */
+    toolName: string;
+}
+
+interface StreamCoherence {
+    sawEnd: boolean;
+    unmatchedToolCalls: UnmatchedToolCall[];
+    error?: string;
+}
+
+interface MutableStreamCoherence {
+    sawEnd: boolean;
+    openToolCalls: Map<string, UnmatchedToolCall>;
+    anonymousToolCall: number;
+}
+
+function stringField(event: Record<string, unknown>, field: string): string | undefined {
+    return typeof event[field] === "string" ? event[field] : undefined;
+}
+
+function trackCoherenceEvent(event: Record<string, unknown>, coherence: MutableStreamCoherence): void {
+    const type = stringField(event, "type");
+    if (type === "agent_end" || type === "agent_settled") coherence.sawEnd = true;
+
+    const toolCallId = stringField(event, "toolCallId");
+    if (type === "tool_execution_start") {
+        const toolName = stringField(event, "toolName") ?? "unknown";
+        coherence.openToolCalls.set(
+            toolCallId ?? `anonymous:${coherence.anonymousToolCall++}`,
+            { id: toolCallId, toolName },
+        );
+    }
+    if (type === "tool_execution_end") {
+        if (toolCallId) {
+            coherence.openToolCalls.delete(toolCallId);
+        } else {
+            const toolName = stringField(event, "toolName");
+            if (toolName) {
+                const matching = [...coherence.openToolCalls].find(([, call]) => call.toolName === toolName);
+                if (matching) coherence.openToolCalls.delete(matching[0]);
+            }
+        }
+    }
+}
+
+/** Extract known event metadata from a bounded prefix of an oversized NDJSON record. */
+function jsonStringField(line: string, field: string): string | undefined {
+    const match = line.match(new RegExp(`"${field}"\\s*:\\s*("(?:\\\\.|[^"\\\\])*")`));
+    if (!match) return undefined;
+    try { return JSON.parse(match[1]); } catch { return undefined; }
+}
+
+function parseCoherenceEvent(line: string, truncated: boolean): Record<string, unknown> | undefined {
+    const text = line.trim();
+    if (!text || text[0] !== "{") return undefined;
+    if (!truncated) {
+        try { return JSON.parse(text); } catch { return undefined; }
+    }
+
+    // Pi writes event metadata at the start of each record. For an oversized
+    // payload, retain only that bounded metadata rather than rebuilding output.
+    const type = jsonStringField(text, "type");
+    if (!type) return undefined;
+    return {
+        type,
+        toolCallId: jsonStringField(text, "toolCallId"),
+        toolName: jsonStringField(text, "toolName"),
+    };
+}
+
+/**
+ * Scan every NDJSON record for terminal and tool-execution coherence without
+ * retaining assistant content. Record prefixes and read buffers are bounded.
+ */
+function scanStreamCoherence(path: string): StreamCoherence {
+    const coherence: MutableStreamCoherence = {
+        sawEnd: false,
+        openToolCalls: new Map<string, UnmatchedToolCall>(),
+        anonymousToolCall: 0,
+    };
+    let fd: number;
+    try {
+        fd = openSync(path, "r");
+    } catch (e) {
+        return { sawEnd: false, unmatchedToolCalls: [], error: `open failed: ${(e as Error).message}` };
+    }
+
+    const buffer = Buffer.alloc(COHERENCE_SCAN_CHUNK_BYTES);
+    let lineParts: Buffer[] = [];
+    let lineBytes = 0;
+    let lineTruncated = false;
+    const appendLineBytes = (bytes: Buffer): void => {
+        if (lineTruncated || bytes.length === 0) return;
+        const remaining = MAX_COHERENCE_EVENT_PREFIX_BYTES - lineBytes;
+        if (remaining <= 0) {
+            lineTruncated = true;
+            return;
+        }
+        const kept = bytes.subarray(0, remaining);
+        lineParts.push(kept);
+        lineBytes += kept.length;
+        if (kept.length < bytes.length) lineTruncated = true;
+    };
+    const finishLine = (): void => {
+        if (lineBytes > 0 || lineTruncated) {
+            const event = parseCoherenceEvent(Buffer.concat(lineParts).toString("utf-8"), lineTruncated);
+            if (event) trackCoherenceEvent(event, coherence);
+        }
+        lineParts = [];
+        lineBytes = 0;
+        lineTruncated = false;
+    };
+
+    try {
+        while (true) {
+            const count = readSync(fd, buffer, 0, buffer.length, null);
+            if (count === 0) break;
+            let start = 0;
+            for (let i = 0; i < count; i++) {
+                if (buffer[i] !== 0x0a) continue;
+                appendLineBytes(buffer.subarray(start, i));
+                finishLine();
+                start = i + 1;
+            }
+            appendLineBytes(buffer.subarray(start, count));
+        }
+        finishLine();
+    } catch (e) {
+        return {
+            sawEnd: false,
+            unmatchedToolCalls: [],
+            error: `read failed: ${(e as Error).message}`,
+        };
+    } finally {
+        closeSync(fd);
+    }
+
+    return { sawEnd: coherence.sawEnd, unmatchedToolCalls: [...coherence.openToolCalls.values()] };
+}
+
 export interface ParsedRun {
     /** Final assistant answer (empty until the run produces one). */
     finalText: string;
@@ -162,6 +307,8 @@ export interface ParsedRun {
     lastActivity: string;
     /** Names of tools the child invoked, in order (deduped-adjacent). */
     toolCalls: string[];
+    /** Tool starts that were not matched by a tool end before parsing stopped. */
+    unmatchedToolCalls: UnmatchedToolCall[];
     /** True if we saw the terminal `agent_end`/`agent_settled` event. */
     sawEnd: boolean;
     /** Cumulative token + cost spend so far. */
@@ -172,8 +319,10 @@ export interface ParsedRun {
 
 /** Parse the log for run `id`. Tolerant of partial/streaming logs. */
 export function parseRun(id: string): ParsedRun {
-    const usage: Usage = { input: 0, output: 0, cacheRead: 0, costUSD: 0, total: 0 };
-    const tail = readTail(logPathFor(id), maxParseBytes());
+    const usage: Usage = { input: 0, output: 0, cacheRead: 0, total: 0, costUSD: 0 };
+    const path = logPathFor(id);
+    const tail = readTail(path, maxParseBytes());
+    const coherence = scanStreamCoherence(path);
     const diagnostics: string[] = [];
 
     // For NDJSON parsing we need complete lines; drop an initial partial line
@@ -189,10 +338,10 @@ export function parseRun(id: string): ParsedRun {
 
     if (tail.error) {
         diagnostics.push(`Log unreadable: ${tail.error}`);
-        return { finalText: "", lastActivity: "", toolCalls: [], sawEnd: false, usage, diagnostics };
+        return { finalText: "", lastActivity: "", toolCalls: [], unmatchedToolCalls: [], sawEnd: false, usage, diagnostics };
     }
     if (tail.totalBytes === 0) {
-        return { finalText: "", lastActivity: "", toolCalls: [], sawEnd: false, usage, diagnostics };
+        return { finalText: "", lastActivity: "", toolCalls: [], unmatchedToolCalls: [], sawEnd: false, usage, diagnostics };
     }
     if (tail.truncated) {
         diagnostics.push(
@@ -200,11 +349,11 @@ export function parseRun(id: string): ParsedRun {
             "Only recent activity is reflected in tokens/tools.",
         );
     }
+    if (coherence.error) diagnostics.push(`Event coherence scan unreadable: ${coherence.error}`);
 
     let finalText = "";
     let lastActivity = "";
     const toolCalls: string[] = [];
-    let sawEnd = false;
 
     for (const line of parseText.split("\n")) {
         const s = line.trim();
@@ -215,14 +364,14 @@ export function parseRun(id: string): ParsedRun {
         const type = e.type as string | undefined;
 
         // Authoritative final answer: the last assistant message at run end.
-        if (type === "agent_end" && Array.isArray(e.messages)) {
-            for (let i = e.messages.length - 1; i >= 0; i--) {
-                const m = e.messages[i] as Msg;
-                if (m?.role === "assistant") { const t = messageText(m); if (t) finalText = t; break; }
+        if (type === "agent_end") {
+            if (Array.isArray(e.messages)) {
+                for (let i = e.messages.length - 1; i >= 0; i--) {
+                    const m = e.messages[i] as Msg;
+                    if (m?.role === "assistant") { const t = messageText(m); if (t) finalText = t; break; }
+                }
             }
-            sawEnd = true;
         }
-        if (type === "agent_settled") sawEnd = true;
 
         // Progress signal + fallback final: finalized assistant turns.
         // Accumulate spend from `message_end` only (fires once per turn), so
@@ -262,9 +411,12 @@ export function parseRun(id: string): ParsedRun {
             }
         }
 
-        // Tool activity.
-        if (type === "tool_execution_start" && typeof e.toolName === "string") {
-            if (toolCalls[toolCalls.length - 1] !== e.toolName) toolCalls.push(e.toolName);
+        // Tool activity. Pi emits a toolCallId for normal events; fall back to
+        // tool-name matching when replaying older/id-less streams.
+        const toolCallId = typeof e.toolCallId === "string" ? e.toolCallId : undefined;
+        if (type === "tool_execution_start") {
+            const toolName = typeof e.toolName === "string" ? e.toolName : "unknown";
+            if (toolCalls[toolCalls.length - 1] !== toolName) toolCalls.push(toolName);
         }
     }
 
@@ -273,7 +425,15 @@ export function parseRun(id: string): ParsedRun {
     }
 
     usage.total = usage.input + usage.output;
-    return { finalText, lastActivity, toolCalls, sawEnd, usage, diagnostics };
+    return {
+        finalText,
+        lastActivity,
+        toolCalls,
+        unmatchedToolCalls: coherence.unmatchedToolCalls,
+        sawEnd: coherence.sawEnd,
+        usage,
+        diagnostics,
+    };
 }
 /** Build the human-readable body for subagent_output. Exported for unit testing. */
 export function formatSubagentOutputBody(

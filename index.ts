@@ -17,7 +17,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "@earendil-works/pi-ai";
 import { spawnDetached, killProcessTree } from "./spawn.ts";
 import { parseRun, tailLog, formatSubagentOutputBody, formatSubagentResultBody, type Usage } from "./parse.ts";
-
+import { classifyChildExit, formatIncompleteResult } from "./lifecycle.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { maybeBuildSandboxCommand } from "./sandbox.ts";
@@ -198,15 +198,17 @@ function resolvePiBinary(): string {
 function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: number | null): void {
     const meta = readMeta(id);
     if (!meta || meta.status !== "running") return;
-    meta.status = code === 0 || code === null ? "completed" : "failed";
+    const r = parseRun(id);
+    const outcome = classifyChildExit(code, r);
+    meta.status = outcome.status;
+    if (outcome.incomplete) meta.failureReason = "incomplete-stream";
     meta.exitCode = code;
     meta.endedAt = Date.now();
     writeMeta(meta);
 
     const label = meta.name ? `${meta.name} (${id})` : id;
-    const verdict = meta.status === "completed" ? "✓ completed" : `✗ failed (exit ${code})`;
+    const verdict = outcome.verdict;
     const el = fmtElapsed(meta.endedAt - meta.startedAt);
-    const r = parseRun(id);
     const spend = fmtSpend(r.usage);
     const stat = `${el}${spend ? ` · ${spend}` : ""}`;
     const tools = r.toolCalls.length ? r.toolCalls.join(", ") : undefined;
@@ -225,6 +227,7 @@ function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: 
     const delivery = buildCompletionDelivery({
         id, label, verdict, stat, tools,
         callback,
+        incomplete: outcome.incomplete,
         resultText: r.finalText || r.lastActivity || "",
     });
     pi.sendMessage(
@@ -505,10 +508,10 @@ export default function (pi: ExtensionAPI) {
             const spend = fmtSpend(r.usage);
             const statSeg = ` · ${el}${spend ? ` · ${spend}` : ""}`;
             const tools = r.toolCalls.length ? ` · tools: ${r.toolCalls.join(", ")}` : "";
-            // Clean final answer parsed from the JSON stream. Fall back to the raw
-            // log tail only if parsing found nothing (e.g. a child that crashed
-            // before emitting any assistant message).
             const rawTail = tailLog(p.id, 40);
+            if (meta.failureReason === "incomplete-stream") {
+                return text(`[${p.id} · ${st} · exit ${exit}${statSeg}${tools}]\n${formatIncompleteResult(r, rawTail)}`);
+            }
             return text(formatSubagentResultBody(
                 `[${p.id} · ${st} · exit ${exit}${statSeg}${tools}]`,
                 r.finalText || undefined,
