@@ -488,6 +488,14 @@ describe("navigator overlay component", () => {
 
     // @covers navigator.overlay
     // @level unit
+    it("an empty list renders an explicit placeholder (defensive; open normally refuses empty)", () => {
+        const state = createNavigatorState([]);
+        const lines = buildNavigatorLines(state, { width: 40 });
+        assert.deepEqual(lines, ["Subagents · 0", "  (no visible subagent runs)", "↑↓ select · esc close"]);
+    });
+
+    // @covers navigator.overlay
+    // @level unit
     it("Up and Down move the selected row (clamped) and request a render", async () => {
         const o = driveOverlay([
             { id: "a", status: "running", model: "m", elapsed: "1s", spend: "" },
