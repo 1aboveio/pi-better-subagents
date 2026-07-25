@@ -1,0 +1,1 @@
+restrict both self-hosted jobs to Linux X64 runners carrying the docker label; add Actionlint custom-label config
