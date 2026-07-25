@@ -1,0 +1,1 @@
+fix review FAIL on a0d85fa: disposable clones must preserve source repo-local Git identity (user.name/user.email/user.signingkey) so AC9 commits work without reconfiguring the clone; add empty-HOME regression test + copyRepoLocalGitIdentity
