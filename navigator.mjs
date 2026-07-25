@@ -1,24 +1,35 @@
 /**
- * Pure seams for the TUI subagent navigator (issues #45 list, #46 detail).
+ * Pure seams for the TUI subagent navigator (issues #45 list, #46 detail,
+ * #47 two-press close).
  *
  * Kept free of pi / pi-tui imports (mirrors widget.mjs) so unit tests pin the
  * behavior contracts without a live TUI. index.ts injects the pi-specific
- * pieces (matchesKey, truncateToWidth, CustomEditor, ctx, getDetail) at the
- * boundary.
+ * pieces (matchesKey, truncateToWidth, CustomEditor, ctx, getDetail, closeRun)
+ * at the boundary.
  *
  * The navigator is a HUMAN organization surface: it reads the #44 registry
- * visibility seams (`navigatorVisibleRuns` / `navigatorVisibleCount`) and never
- * mutates run state. The passive live widget is untouched by this module.
+ * visibility seams (`navigatorVisibleRuns` / `navigatorVisibleCount`). List and
+ * detail views are read-only; the #47 Close action is the sole mutator, and it
+ * goes through the shared #44 stop/dismiss seams (never a second persistence
+ * model). The passive live widget is untouched by this module.
  *
  * Detail view (#46) refreshes via an injected interval (default 1s) and must
  * dispose that timer on every exit path (back, Escape, overlay close, teardown).
+ * Close arm timers (#47) dispose on the same paths plus selection change and
+ * list↔detail transitions.
  */
 
 /** Detail-view refresh cadence (ms). Mirrors the live widget tick. */
 export const DETAIL_TICK_MS = 1000;
 
+/** Two-press Close confirmation window (ms). Exclusive at the boundary. */
+export const CLOSE_ARM_MS = 3000;
+
 /** Footer status key for the `← subagents · N` hint (default footer mechanism). */
 export const NAVIGATOR_STATUS_KEY = "subagents-nav";
+
+/** Footer status key for the Close confirmation hint (coexists with count hint). */
+export const CLOSE_CONFIRM_STATUS_KEY = "subagents-close";
 
 /**
  * Footer hint text: `← subagents · N` while at least one visible
@@ -37,6 +48,84 @@ export function applyNavigatorFooter(ui, count) {
     const hint = navigatorFooterHint(count);
     ui.setStatus(NAVIGATOR_STATUS_KEY, hint ?? undefined);
     return hint;
+}
+
+// ---------------------------------------------------------------------------
+// Close confirmation (issue #47)
+// ---------------------------------------------------------------------------
+
+/**
+ * Footer confirmation hint while Close is armed.
+ * Running → `x again to stop <name>`; terminal → `x again to dismiss <name>`.
+ * Name falls back to id when missing/null.
+ */
+export function closeConfirmHint(row) {
+    if (!row) return null;
+    const label = (row.name != null && String(row.name).length > 0) ? String(row.name) : String(row.id);
+    const running = row.status === "running";
+    return running ? `x again to stop ${label}` : `x again to dismiss ${label}`;
+}
+
+/**
+ * Publish/clear the Close confirmation hint through pi's default footer status
+ * mechanism (a dedicated key so it coexists with `← subagents · N`).
+ * Pass null/undefined to clear.
+ */
+export function applyCloseConfirmFooter(ui, hint) {
+    ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, hint ?? undefined);
+    return hint ?? null;
+}
+
+/** Mutable Close-arm record. `id` null means disarmed. */
+export function createCloseArm(id, armedAt) {
+    return { id: id ?? null, armedAt: armedAt ?? 0 };
+}
+
+/** True when `arm` is live for `id` at `now` (window is [armedAt, armedAt+CLOSE_ARM_MS)). */
+export function isCloseArmed(arm, id, now, windowMs = CLOSE_ARM_MS) {
+    if (!arm || arm.id == null || id == null) return false;
+    if (arm.id !== id) return false;
+    if (typeof now !== "number" || typeof arm.armedAt !== "number") return false;
+    return now >= arm.armedAt && now < arm.armedAt + windowMs;
+}
+
+/** Clear an arm record in place. */
+export function disarmClose(arm) {
+    if (!arm) return arm;
+    arm.id = null;
+    arm.armedAt = 0;
+    return arm;
+}
+
+/**
+ * Perform Close on a run id: reread meta + effective status, then either
+ * stop+dismiss (running) or dismiss-only (terminal / finished-during-arm).
+ *
+ * Reuses #44 `stopRun` / `dismissRun` — never invents a second kill path.
+ * Unknown ids return `{ action: "missing" }` without throwing.
+ *
+ * @param {string} id
+ * @param {object} deps
+ * @param {(id: string) => object|undefined} deps.readMeta
+ * @param {(m: object) => string} deps.effectiveStatus
+ * @param {(id: string) => { action: string, id: string, status?: string }} deps.stopRun
+ * @param {(id: string, at?: number) => object|undefined} deps.dismissRun
+ * @param {() => number} [deps.now]
+ */
+export function executeNavigatorClose(id, deps) {
+    const meta = deps.readMeta(id);
+    if (!meta) return { action: "missing", id };
+    const status = deps.effectiveStatus(meta);
+    const at = typeof deps.now === "function" ? deps.now() : Date.now();
+    if (status === "running") {
+        // stopRun itself rereads; we still branch on our fresh effective status
+        // so a finish-during-arm never reaches the kill path from a stale row.
+        deps.stopRun(id);
+        deps.dismissRun(id, at);
+        return { action: "stopped-and-dismissed", id, status: "killed" };
+    }
+    deps.dismissRun(id, at);
+    return { action: "dismissed", id, status };
 }
 
 /**
@@ -138,7 +227,7 @@ export function buildNavigatorLines(state, opts = {}) {
         if (r.spend) parts.push(r.spend);
         lines.push(prefix + parts.join(" · "));
     }
-    lines.push("↑↓ select · enter open · esc close");
+    lines.push("↑↓ select · enter open · x close · esc close");
     return lines.map((l) => truncate(l, width));
 }
 
@@ -212,7 +301,7 @@ export function buildDetailLines(detail, opts = {}) {
     for (const raw of body.split(/\r?\n/)) {
         lines.push(raw.length ? raw : " ");
     }
-    lines.push("← back · esc close");
+    lines.push("← back · x close · esc close");
     return lines.map((l) => truncate(l, width));
 }
 
@@ -252,14 +341,61 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
     let detailId = null;
     /** @type {ReturnType<typeof setInterval>|null} */
     let detailTimer = null;
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    let closeArmTimer = null;
+    const closeArm = createCloseArm(null, 0);
     let closed = false;
 
     const setIntervalFn = deps.setInterval ?? globalThis.setInterval.bind(globalThis);
     const clearIntervalFn = deps.clearInterval ?? globalThis.clearInterval.bind(globalThis);
+    const setTimeoutFn = deps.setTimeout ?? globalThis.setTimeout.bind(globalThis);
+    const clearTimeoutFn = deps.clearTimeout ?? globalThis.clearTimeout.bind(globalThis);
+    const nowFn = deps.now ?? (() => Date.now());
     const tickMs = deps.tickMs ?? DETAIL_TICK_MS;
 
     const fg = (color, s) =>
         theme && typeof theme.fg === "function" ? theme.fg(color, s) : s;
+
+    function publishCloseHint(hint) {
+        if (typeof deps.onCloseConfirmHint === "function") {
+            try { deps.onCloseConfirmHint(hint); } catch { /* ignore */ }
+        }
+    }
+
+    function stopCloseArmTimer() {
+        if (closeArmTimer != null) {
+            try { clearTimeoutFn(closeArmTimer); } catch { /* ignore */ }
+            closeArmTimer = null;
+        }
+    }
+
+    function clearCloseArm() {
+        const wasArmed = closeArm.id != null;
+        stopCloseArmTimer();
+        disarmClose(closeArm);
+        if (wasArmed) publishCloseHint(null);
+    }
+
+    function armCloseFor(row) {
+        if (!row || row.id == null) return;
+        stopCloseArmTimer();
+        const at = nowFn();
+        closeArm.id = row.id;
+        closeArm.armedAt = at;
+        const hint = closeConfirmHint(row);
+        publishCloseHint(hint);
+        // Auto-disarm exactly at the window boundary.
+        closeArmTimer = setTimeoutFn(() => {
+            closeArmTimer = null;
+            // Only clear if this arm is still the live one.
+            if (closeArm.id === row.id && closeArm.armedAt === at) {
+                disarmClose(closeArm);
+                publishCloseHint(null);
+                try { tui.requestRender(); } catch { /* ignore */ }
+            }
+        }, CLOSE_ARM_MS);
+        try { tui.requestRender(); } catch { /* ignore */ }
+    }
 
     function stopDetailTimer() {
         if (detailTimer != null) {
@@ -277,10 +413,70 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
         }
     }
 
+    function refreshRows() {
+        if (typeof deps.getRows !== "function") return;
+        try {
+            const next = deps.getRows();
+            if (Array.isArray(next)) state.rows = next;
+        } catch { /* keep prior rows */ }
+    }
+
+    function currentTargetRow() {
+        if (mode === "detail") {
+            if (detailId == null) return null;
+            // Prefer live detail snapshot (status may have changed while armed).
+            if (detail && detail.id === detailId) {
+                return { id: detail.id, name: detail.name, status: detail.status };
+            }
+            const fromList = (state.rows ?? []).find((r) => r && r.id === detailId);
+            return fromList ?? { id: detailId, name: detailId, status: "completed" };
+        }
+        if (state.rows.length === 0) return null;
+        return state.rows[state.selected] ?? null;
+    }
+
+    function handleCloseKey() {
+        const row = currentTargetRow();
+        if (!row || row.id == null) return;
+        const now = nowFn();
+        if (isCloseArmed(closeArm, row.id, now)) {
+            // Second press within the window on the same run — act.
+            const armedId = closeArm.id;
+            clearCloseArm();
+            let outcome = { action: "missing", id: armedId };
+            if (typeof deps.closeRun === "function") {
+                try {
+                    outcome = deps.closeRun(armedId) ?? outcome;
+                } catch {
+                    outcome = { action: "missing", id: armedId };
+                }
+            }
+            if (typeof deps.onClosed === "function") {
+                try { deps.onClosed(outcome); } catch { /* ignore */ }
+            }
+            // Leave detail (if any) and refresh the visible list.
+            if (mode === "detail") {
+                stopDetailTimer();
+                mode = "list";
+                detail = null;
+                detailId = null;
+            }
+            refreshRows();
+            // Prefer keeping selection near the closed run's former neighbors.
+            selectById(state, armedId);
+            clampSelection(state);
+            try { tui.requestRender(); } catch { /* ignore */ }
+            return;
+        }
+        // First press (or expired / different selection): arm only — never mutate.
+        armCloseFor(row);
+    }
+
     function enterDetail() {
         if (state.rows.length === 0) return;
         const row = state.rows[state.selected];
         if (!row) return;
+        clearCloseArm();
         detailId = row.id;
         detail = loadDetail(detailId) ?? {
             id: detailId,
@@ -306,17 +502,13 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
     function leaveDetail() {
         if (mode !== "detail") return;
         const viewedId = detailId;
+        clearCloseArm();
         stopDetailTimer();
         mode = "list";
         detail = null;
         detailId = null;
         // Optional live list refresh so a disappeared run can clamp cleanly.
-        if (typeof deps.getRows === "function") {
-            try {
-                const next = deps.getRows();
-                if (Array.isArray(next)) state.rows = next;
-            } catch { /* keep prior rows */ }
-        }
+        refreshRows();
         selectById(state, viewedId);
         try { tui.requestRender(); } catch { /* ignore */ }
     }
@@ -324,6 +516,7 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
     function close() {
         if (closed) return;
         closed = true;
+        clearCloseArm();
         stopDetailTimer();
         mode = "list";
         detail = null;
@@ -333,10 +526,18 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
 
     function dispose() {
         // Session teardown / host overlay dismiss — always safe, idempotent.
+        clearCloseArm();
         stopDetailTimer();
         mode = "list";
         detail = null;
         detailId = null;
+    }
+
+    /** True when input is the Close key (`x` / `X`). */
+    function isCloseKey(data) {
+        if (deps.matchKey(data, "x") || deps.matchKey(data, "X")) return true;
+        // Literal fallback for tests / hosts that don't map a Key.x id.
+        return data === "x" || data === "X";
     }
 
     return {
@@ -360,29 +561,37 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
         handleInput(data) {
             if (closed) return;
             if (mode === "detail") {
-                if (deps.matchKey(data, "left")) {
+                if (isCloseKey(data)) {
+                    handleCloseKey();
+                } else if (deps.matchKey(data, "left")) {
                     leaveDetail();
                 } else if (deps.matchKey(data, "escape")) {
                     close();
                 }
-                // Detail owns no other keys in #46 (close/dismiss is #47).
                 return;
             }
-            if (deps.matchKey(data, "up")) {
-                if (moveSelection(state, -1)) tui.requestRender();
+            if (isCloseKey(data)) {
+                handleCloseKey();
+            } else if (deps.matchKey(data, "up")) {
+                if (moveSelection(state, -1)) {
+                    clearCloseArm();
+                    tui.requestRender();
+                }
             } else if (deps.matchKey(data, "down")) {
-                if (moveSelection(state, 1)) tui.requestRender();
+                if (moveSelection(state, 1)) {
+                    clearCloseArm();
+                    tui.requestRender();
+                }
             } else if (deps.matchKey(data, "enter")) {
                 enterDetail();
             } else if (deps.matchKey(data, "escape")) {
                 close();
             }
-            // Anything else is ignored in list view (#47 owns `x`).
         },
         invalidate() {
             // Stateless render — nothing cached to clear on theme changes.
         },
-        /** Clear detail timers. Safe to call multiple times / after close. */
+        /** Clear detail + close-arm timers. Safe to call multiple times / after close. */
         dispose,
     };
 }
