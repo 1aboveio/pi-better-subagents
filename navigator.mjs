@@ -33,11 +33,18 @@ export function applyNavigatorFooter(ui, count) {
 }
 
 /**
- * True only when a UI-bearing (TUI) context is available. Every navigator
+ * True only in an interactive TUI session with a UI present. Every navigator
  * entry point is gated on this so print/RPC sessions stay untouched.
+ *
+ * Pi exposes `hasUI: true` (and a `ui` object) in BOTH TUI and RPC modes
+ * (extensions.md: `hasUI` guards dialog/notification methods that work in
+ * both). The navigator uses terminal-only features — the `custom()` overlay
+ * and the editor component factory — so the guard must require an explicit
+ * `ctx.mode === "tui"` on top of UI availability; `hasUI` alone would leak
+ * `setStatus`/`setEditorComponent`/`custom` calls into RPC sessions.
  */
 export function isNavigatorUiAvailable(ctx) {
-    return Boolean(ctx && ctx.hasUI === true && ctx.ui);
+    return Boolean(ctx && ctx.mode === "tui" && ctx.hasUI === true && ctx.ui);
 }
 
 /**

@@ -98,9 +98,15 @@ await record(
         check(statuses[0][0] === NAVIGATOR_STATUS_KEY && statuses[0][1] === hint, "status key/text wrong");
         applyNavigatorFooter(ui, 0);
         check(statuses[1][1] === undefined, "hint must clear at zero visible runs");
-        check(isNavigatorUiAvailable({ hasUI: false, ui }) === false, "non-TUI contexts must fail the guard");
-        check(isNavigatorUiAvailable({ hasUI: true, ui }) === true, "TUI contexts must pass the guard");
-        return `real registry: visible count ${count} (dismissed excluded) → setStatus('${NAVIGATOR_STATUS_KEY}', '${hint}'); count 0 → status cleared; hasUI guard honored`;
+        // The guard requires explicit TUI mode: pi exposes hasUI:true + a ui
+        // object in RPC mode too, and the navigator is terminal-only there.
+        check(
+            isNavigatorUiAvailable({ mode: "rpc", hasUI: true, ui }) === false,
+            "RPC contexts (mode:rpc with hasUI:true + ui) must fail the guard",
+        );
+        check(isNavigatorUiAvailable({ mode: "print" }) === false, "print contexts must fail the guard");
+        check(isNavigatorUiAvailable({ mode: "tui", hasUI: true, ui }) === true, "real TUI contexts must pass the guard");
+        return `real registry: visible count ${count} (dismissed excluded) → setStatus('${NAVIGATOR_STATUS_KEY}', '${hint}'); count 0 → status cleared; guard: rpc blocked / print blocked / tui allowed`;
     },
 );
 

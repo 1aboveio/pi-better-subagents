@@ -152,25 +152,73 @@ describe("navigator footer hint", () => {
 // Non-TUI guard (AC: navigator inactive in non-TUI modes)
 // ---------------------------------------------------------------------------
 describe("non-TUI guard", () => {
+    // Real context shapes per pi's extensions.md: hasUI is true in BOTH TUI
+    // and RPC modes; mode is "tui" | "rpc" | "json" | "print". The navigator
+    // uses terminal-only features (custom() overlay, editor component
+    // factory), so the guard must require ctx.mode === "tui" — hasUI alone
+    // leaks setStatus/editor/overlay wiring into RPC sessions.
     // @covers navigator.footer-hint
     // @covers navigator.editor-wrapper
     // @level unit
-    it("navigator UI is available only with hasUI and a ui object", () => {
-        assert.equal(isNavigatorUiAvailable({ hasUI: true, ui: {} }), true);
-        assert.equal(isNavigatorUiAvailable({ hasUI: false, ui: {} }), false);
-        assert.equal(isNavigatorUiAvailable({ hasUI: false }), false);
+    it("navigator UI is available only in TUI mode with a UI", () => {
+        // The real TUI shape passes.
+        assert.equal(isNavigatorUiAvailable({ mode: "tui", hasUI: true, ui: {} }), true);
+        // The real RPC shape (hasUI:true AND a ui object, per pi docs) must
+        // NOT enable navigator wiring.
+        assert.equal(
+            isNavigatorUiAvailable({ mode: "rpc", hasUI: true, ui: { setStatus() {}, custom() {}, setEditorComponent() {} } }),
+            false,
+        );
+        // Print/JSON modes have no UI at all.
+        assert.equal(isNavigatorUiAvailable({ mode: "print" }), false);
+        assert.equal(isNavigatorUiAvailable({ mode: "json", hasUI: false }), false);
+        // Fail closed on a missing mode: UI availability without an explicit
+        // TUI mode is not enough.
+        assert.equal(isNavigatorUiAvailable({ hasUI: true, ui: {} }), false);
+        // TUI mode still requires the UI to actually be present.
+        assert.equal(isNavigatorUiAvailable({ mode: "tui", hasUI: true }), false);
+        assert.equal(isNavigatorUiAvailable({ mode: "tui", hasUI: false, ui: {} }), false);
         assert.equal(isNavigatorUiAvailable(undefined), false);
-        assert.equal(isNavigatorUiAvailable({ hasUI: true }), false);
+    });
+
+    // @covers navigator.footer-hint
+    // @covers navigator.editor-wrapper
+    // @covers navigator.overlay
+    // @level unit
+    it("a real RPC-shaped context (mode:rpc, hasUI:true, ui) reaches no footer/editor/overlay wiring", () => {
+        const calls = [];
+        const ui = {
+            setStatus: (...a) => calls.push(["setStatus", ...a]),
+            getEditorComponent: () => undefined,
+            setEditorComponent: (...a) => calls.push(["setEditorComponent", ...a]),
+            custom: (...a) => calls.push(["custom", ...a]),
+        };
+        const rpcCtx = { mode: "rpc", hasUI: true, ui };
+        // The three index.ts entry points (updateNavigatorFooter /
+        // installNavigator / openNavigator) all begin with this exact guard;
+        // behind it sit the only calls into ui.setStatus / ui.setEditorComponent
+        // / ui.custom the navigator makes.
+        if (isNavigatorUiAvailable(rpcCtx)) {
+            applyNavigatorFooter(ui, 1);
+            installNavigatorEditor(ui, wrapperDeps({ createDefaultEditor: () => ({}) }));
+            showNavigator(ui, [{ id: "sa_x" }], { matchKey: () => false, truncate: (s) => s });
+        }
+        assert.deepEqual(calls, [], "RPC contexts must never reach setStatus / setEditorComponent / custom");
     });
 
     // @covers navigator.footer-hint
     // @covers navigator.editor-wrapper
     // @level unit
-    it("every navigator entry point in index.ts is behind the hasUI guard", () => {
+    it("every navigator entry point in index.ts is behind the TUI-mode guard", () => {
         const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
         // The guard seam is the single gate used by footer install/update, the
         // editor install, and overlay open — print/RPC contexts fail it.
         assert.ok(src.includes("isNavigatorUiAvailable"), "index.ts must gate navigator wiring on isNavigatorUiAvailable");
+        const navSrc = readFileSync(new URL("../navigator.mjs", import.meta.url), "utf8");
+        assert.ok(
+            navSrc.includes('ctx.mode === "tui"'),
+            "isNavigatorUiAvailable must require explicit TUI mode (pi docs: hasUI is true in TUI AND RPC)",
+        );
     });
 });
 

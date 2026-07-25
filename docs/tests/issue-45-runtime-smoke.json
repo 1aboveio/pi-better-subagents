@@ -4,7 +4,7 @@
     "kind": "library",
     "status": "pass",
     "command": "node docs/tests/issue-45-runtime-smoke.mjs",
-    "observed": "real registry: visible count 1 (dismissed excluded) → setStatus('subagents-nav', '← subagents · 1'); count 0 → status cleared; hasUI guard honored"
+    "observed": "real registry: visible count 1 (dismissed excluded) → setStatus('subagents-nav', '← subagents · 1'); count 0 → status cleared; guard: rpc blocked / print blocked / tui allowed"
   },
   {
     "surface": "navigator.editor-wrapper",
