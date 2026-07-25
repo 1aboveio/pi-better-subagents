@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Merge-queue integration suite — the expensive pre-merge gate.
 #
-# Runs the two tests that prove a real subagent can:
-#   1. use an extension tool (web_fetch) against the network
-#   2. drive gh headlessly via inherited GH_TOKEN
+# Runs the merge-queue gate tests:
+#   1. macOS write-sandbox is applied (deterministic, no model)
+#   2. sandboxed child cannot write outside sandbox_dir (deterministic)
+#   3. extension tool web_fetch works in a scoped child
+#   4. bash-scoped child can drive gh headlessly via GH_TOKEN
 #
-# The sandbox/env-inheritance test is intentionally excluded until Linux
-# sandbox support lands (see issue #5). Run it locally via tests/run_all.sh.
+# test_env_inherit.sh stays local-only (run_all.sh) — env-through-sandbox is
+# covered there; queue keeps the two security asserts + network/gh smokes.
+# Sandbox tests SKIP cleanly on non-macOS (see issue #5 for Linux).
 #
 # Usage:
 #   tests/run_queue.sh
@@ -18,7 +21,12 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Default to the same MiniMax-CN M3 config used in CI / local models.json.
 export PI_SUBAGENT_TEST_MODEL="${PI_SUBAGENT_TEST_MODEL:-minimax-cn/MiniMax-M3}"
 
-tests=("$DIR/test_web_fetch.sh" "$DIR/test_gh_issues.sh")
+tests=(
+    "$DIR/test_sandbox_applied.sh"
+    "$DIR/test_sandbox_deny_outside.sh"
+    "$DIR/test_web_fetch.sh"
+    "$DIR/test_gh_issues.sh"
+)
 declare -a results
 fail=0
 

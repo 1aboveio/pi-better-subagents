@@ -7,18 +7,23 @@ stdin, positional prompt) and parses the result the way `parse.ts` does.
 
 | Test | Proves |
 |------|--------|
-| `test_web_fetch.sh` | An extension-provided tool (`web_fetch`) works in a scoped child: fetch `github.com/1aboveio/pi-better-subagents`, report a word count. |
-| `test_gh_issues.sh` | A `bash`-scoped child can drive an external CLI: `gh issue list -R 1aboveio/pi-better-subagents`. |
-| `test_env_inherit.sh` | The foreground environment (e.g. `GH_TOKEN`) reaches the subagent **through the OS sandbox** — the hardening test for credential passing. |
+| `test_sandbox_applied.sh` | macOS: the same `sandbox-exec` profile subagents use is applied — writes **inside** `sandbox_dir` succeed (deterministic, no model). |
+| `test_sandbox_deny_outside.sh` | macOS: under that profile, writes **outside** `sandbox_dir` are denied and create no file (deterministic, no model). |
+| `sandbox_profile.test.mjs` | Unit: `sandbox.ts` emits deny-all-writes + allow `sandbox_dir` (and pi system paths). |
+| `test_web_fetch.sh` | An extension-provided tool (`web_fetch`) works in a scoped child: fetch the repo page, report a word count. |
+| `test_gh_issues.sh` | A `bash`-scoped child can drive an external CLI: `gh issue list` against this repo. |
+| `test_env_inherit.sh` | The foreground environment (e.g. `GH_TOKEN`) reaches the subagent **through the OS sandbox** — credential passing. |
 
 ## Run
 
 ```bash
-tests/run_all.sh                                      # full local suite (3 tests)
-tests/run_queue.sh                                    # merge-queue suite (web_fetch + gh)
+tests/run_all.sh                                      # full local suite
+tests/run_queue.sh                                    # merge-queue suite (sandbox + web_fetch + gh)
 PI_SUBAGENT_TEST_MODEL=minimax-cn/MiniMax-M3 tests/run_queue.sh
 PI_SUBAGENT_TEST_TIMEOUT=400 tests/run_all.sh         # slower models
-tests/test_web_fetch.sh                               # one test
+tests/test_sandbox_applied.sh                         # one test (macOS)
+tests/test_sandbox_deny_outside.sh                    # one test (macOS)
+node --test tests/*.test.mjs                          # unit (incl. sandbox profile)
 ```
 
 Default model is `minimax-cn/MiniMax-M3` (same as local `~/.pi/agent/models.json`).
@@ -33,8 +38,9 @@ Two-step gate (see `.mergify.yml`):
 | 1. PR gate | `.github/workflows/ci.yml` | every PR | `ci` |
 | 2. Queue gate | `.github/workflows/integration-tests.yml` | `mergify/merge-queue/*` only | `integration` |
 
-`run_queue.sh` is what step 2 runs. `test_env_inherit.sh` stays local-only until
-Linux sandbox support lands ([#5](https://github.com/1aboveio/pi-better-subagents/issues/5)).
+`run_queue.sh` is what step 2 runs. It includes the two macOS sandbox security
+tests (they `SKIP` on non-macOS) plus web_fetch + gh. `test_env_inherit.sh`
+stays local-only (`run_all.sh`). Linux write-sandbox: [#5](https://github.com/exoulster/pi-better-subagents/issues/5).
 
 ## What to expect
 

@@ -22,11 +22,25 @@ SUBAGENT_DENY="subagent_spawn,subagent_list,subagent_output,subagent_result,suba
 
 mkdir -p "$SESS"
 
+# require_macos_sandbox
+#   Exit 0 with SKIP on non-macOS / missing sandbox-exec. Security tests that
+#   need kernel confinement call this first (macOS-only for now; see issue #5).
+require_macos_sandbox() {
+    if [ "$(uname -s)" != "Darwin" ] || [ ! -x /usr/bin/sandbox-exec ]; then
+        echo "  SKIP: OS write-sandbox tests require macOS sandbox-exec (see issue #5 for Linux)."
+        exit 0
+    fi
+}
+
 # _write_sandbox_profile FILE WRITABLE_DIR
 #   Mirrors sandbox.ts: reads/network open, writes confined to WRITABLE_DIR plus
 #   the system paths pi needs. Keep in sync with sandbox.ts.
 _write_sandbox_profile() {
-    local file="$1" dir; dir="$(cd "$2" 2>/dev/null && pwd -P || echo "$2")"
+    local file="$1" raw="$2" dir
+    mkdir -p "$raw" "$(dirname "$file")"
+    # Match sandbox.ts realpathSync: sandbox-exec evaluates canonical paths
+    # (/tmp → /private/tmp on macOS).
+    dir="$(cd "$raw" 2>/dev/null && pwd -P || echo "$raw")"
     cat > "$file" <<EOF
 (version 1)
 (allow default)
@@ -37,6 +51,22 @@ _write_sandbox_profile() {
 (allow file-write* (subpath "/private/tmp"))
 (allow file-write* (subpath "/dev"))
 EOF
+}
+
+# run_sandboxed_bash SANDBOX_DIR BASH_SCRIPT
+#   Runs `bash -c SCRIPT` under the SAME sandbox-exec profile subagent children
+#   use (via run_child SANDBOX_DIR / extension sandbox.ts). cwd is SANDBOX_DIR.
+#   No model involved — deterministic confinement checks. Prints script stdout.
+#   Returns the sandboxed bash exit code.
+run_sandboxed_bash() {
+    local sbxdir="$1" script="$2"
+    local prof rc
+    mkdir -p "$RUNTIME/runs" "$sbxdir"
+    prof="$RUNTIME/runs/sbx_bash_$$_$RANDOM.sb"
+    _write_sandbox_profile "$prof" "$sbxdir"
+    # Use the resolved writable root as cwd (same as run_child).
+    local runcwd; runcwd="$(cd "$sbxdir" && pwd -P)"
+    ( cd "$runcwd" && /usr/bin/sandbox-exec -f "$prof" /bin/bash -c "$script" )
 }
 
 # run_child ID TOOLS PROMPT [SANDBOX_DIR]
