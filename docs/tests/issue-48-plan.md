@@ -1,7 +1,7 @@
 # Issue #48 — Incremental plan (implement-and-pr step 4)
 
 Unit: #48 Harden subagent navigator rendering, reload behavior, and docs
-Branch: `issue-48-hardening-subagent-navigator` (stacked on `origin/issue-47-close-subagent-navigator` @ `2fe2af5`)
+Branch: `issue-48-hardening-subagent-navigator` (stacked on `origin/issue-47-close-subagent-navigator` @ `ed82be11889ac7546662dd43d423073e7e284530` / `ed82be1`; merge-base confirmed)
 TDD: yes (AC-backed). Prefer characterization of existing seams; runtime fixes only for contract gaps.
 Out of scope: redesign of #44–#47 semantics; new slash commands; model-facing navigator tools.
 
