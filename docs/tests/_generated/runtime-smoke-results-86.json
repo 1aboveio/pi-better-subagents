@@ -1,0 +1,42 @@
+{
+  "results": [
+    {
+      "surface": "subagent.run-finalization",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types tests/smoke_midturn_exit.mjs",
+      "observed": "SMOKE PASS: finalizeRun persisted failed/incomplete_no_terminal_event and emitted ATTENTION callback"
+    },
+    {
+      "surface": "subagent.result",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types tests/smoke_midturn_exit.mjs",
+      "observed": "buildSubagentResultText includes lifecycle incomplete_no_terminal_event and does not present bare progress as the final answer"
+    },
+    {
+      "surface": "subagent.run-log-parser",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types tests/smoke_midturn_exit.mjs",
+      "observed": "real parseRunForLifecycle inside finalizeRun exposed unmatched bash tool start and sawEnd=false for the mid-turn log; full-stream scan remains authoritative under reduced parse windows and caps newline-free records to a fixed prefix"
+    },
+    {
+      "surface": "subagent.completion-callback",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types tests/smoke_midturn_exit.mjs",
+      "observed": "finalizeRun callback content uses ATTENTION wording and lifecycle incomplete_no_terminal_event"
+    }
+  ],
+  "limitations": [
+    {
+      "surface": "index.ts host package import",
+      "status": "accepted",
+      "reason": "Directly importing index.ts still requires @earendil-works/pi-ai; durable finalize/result authority is exercised via finalization.ts (the extracted first-party path index.ts delegates to)."
+    }
+  ],
+  "round3": {
+    "notes": "Large newline-free lifecycle scan proven by unit/integration tests (tight-heap child --max-old-space-size=16 for 8 MiB record; finalizeRun large agent_end complete; capped unknown fail-closed)."
+  }
+}

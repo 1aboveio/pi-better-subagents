@@ -167,9 +167,11 @@ describe('buildCompletionDelivery', () => {
         const d = buildCompletionDelivery({
             id: 'sa_incomplete', label: 'worker (sa_incomplete)', verdict: '! incomplete child exit (exit 0)',
             stat: '14s', callback: true, incomplete: true,
+            lifecycleClassification: 'incomplete_no_terminal_event',
         });
 
         assert.match(d.content, /unexpectedly/i);
+        assert.match(d.content, /lifecycle incomplete_no_terminal_event|attention/i);
         assert.doesNotMatch(d.content, /has returned|completed/i);
     });
 
@@ -179,10 +181,25 @@ describe('buildCompletionDelivery', () => {
         const d = buildCompletionDelivery({
             id: 'sa_incomplete_quiet', label: 'worker', verdict: '! incomplete child exit (exit 0)',
             stat: '14s', callback: false, incomplete: true,
+            lifecycleClassification: 'incomplete_open_tools',
         });
 
         assert.match(d.content, /ended unexpectedly/i);
+        assert.match(d.content, /lifecycle incomplete_open_tools|attention/i);
         assert.doesNotMatch(d.content, /completed|result NOT auto-posted/i);
+    });
+
+    // @covers subagent.completion-callback
+    // @level unit
+    it('failed_exit callbacks stay attention-aware without incomplete-stream wording', () => {
+        const d = buildCompletionDelivery({
+            id: 'sa_failed', label: 'worker', verdict: '✗ failed (exit 1)',
+            stat: '2s', callback: true, incomplete: false,
+            lifecycleClassification: 'failed_exit',
+        });
+
+        assert.match(d.content, /has returned|failed/i);
+        assert.doesNotMatch(d.content, /ended unexpectedly|incomplete/i);
     });
 
     it('callback:true delivery content never contains resultText sentinel', () => {
@@ -237,78 +254,96 @@ describe('buildCompletionDelivery', () => {
         assert.ok(!d.content.includes('THE ACTUAL RESULT SHOULD NOT APPEAR'));
     });
 
-    it('index.ts calls buildCompletionDelivery in finalizeRun', async () => {
+    it('finalization.ts calls buildCompletionDelivery in finalizeRun', async () => {
         const { readFileSync } = await import('node:fs');
-        const indexSource = readFileSync(
-            path.resolve(__dirname, '..', 'index.ts'),
+        const finalizationSource = readFileSync(
+            path.resolve(__dirname, '..', 'finalization.ts'),
             'utf8'
         );
         assert.ok(
-            indexSource.includes('buildCompletionDelivery'),
-            'index.ts must call buildCompletionDelivery in finalizeRun'
+            finalizationSource.includes('buildCompletionDelivery'),
+            'finalization.ts must call buildCompletionDelivery in finalizeRun'
         );
-        // The old inline if/else formatters must not be called directly in finalizeRun.
-        // The replace is safe: formatCallbackTrigger/Quiet are still imported for
-        // buildCompletionDelivery itself.
     });
 });
 
-// Integration test: verify index.ts wires finalizeRun to buildCompletionDelivery
-describe('index.ts integration', async () => {
+// Integration test: verify finalization.ts owns delivery assembly and index wires it
+describe('finalization wiring', async () => {
     const indexPath = path.resolve(__dirname, '..', 'index.ts');
+    const finalizationPath = path.resolve(__dirname, '..', 'finalization.ts');
     const indexSource = await import('node:fs').then(fs =>
         fs.promises.readFile(indexPath, 'utf8')
     );
+    const finalizationSource = await import('node:fs').then(fs =>
+        fs.promises.readFile(finalizationPath, 'utf8')
+    );
 
-    it('index.ts imports buildCompletionDelivery from completion.ts', () => {
+    it('index.ts delegates finalizeRun to finalization.ts', () => {
         assert.ok(
-            indexSource.includes('buildCompletionDelivery'),
-            'index.ts must import buildCompletionDelivery from completion.ts'
+            indexSource.includes('finalizeRun as finalizeRunCore') ||
+            indexSource.includes('from "./finalization.ts"'),
+            'index.ts must import finalizeRun from finalization.ts'
+        );
+        assert.ok(
+            indexSource.includes('finalizeRunCore('),
+            'index.ts host wrapper must call finalizeRunCore'
+        );
+    });
+
+    it('finalization.ts imports buildCompletionDelivery from completion.ts', () => {
+        assert.ok(
+            finalizationSource.includes('buildCompletionDelivery'),
+            'finalization.ts must import buildCompletionDelivery from completion.ts'
         );
     });
 
     it('finalizeRun calls buildCompletionDelivery', () => {
-        // Verify finalizeRun calls buildCompletionDelivery (the single assembly point)
         assert.ok(
-            indexSource.includes('buildCompletionDelivery({'),
+            finalizationSource.includes('buildCompletionDelivery({'),
             'finalizeRun must call buildCompletionDelivery({ ... })'
         );
     });
 
     it('finalizeRun passes resultText: r.finalText || r.lastActivity || "" to buildCompletionDelivery', () => {
         assert.ok(
-            indexSource.includes('resultText: r.finalText') ||
-            indexSource.includes('resultText: r.lastActivity'),
+            finalizationSource.includes('resultText: r.finalText') ||
+            finalizationSource.includes('resultText: r.lastActivity'),
             'finalizeRun must pass resultText from r.finalText or r.lastActivity'
         );
     });
 
-    it('finalizeRun calls pi.sendMessage with delivery.content and delivery.options', () => {
+    it('finalizeRun delivers via hooks.sendMessage with delivery.content and delivery.options', () => {
         assert.ok(
-            indexSource.includes('content: delivery.content'),
-            'pi.sendMessage must use delivery.content'
+            finalizationSource.includes('content: delivery.content'),
+            'sendMessage must use delivery.content'
         );
         assert.ok(
-            indexSource.includes('delivery.options'),
-            'pi.sendMessage must use delivery.options'
+            finalizationSource.includes('delivery.options'),
+            'sendMessage must use delivery.options'
+        );
+        assert.ok(
+            indexSource.includes('sendMessage:'),
+            'index.ts must wire pi.sendMessage into finalize hooks'
         );
     });
 
-    it('formatCallbackTrigger and formatCallbackQuiet are still exported (used by buildCompletionDelivery)', () => {
+    it('formatCallbackTrigger and formatCallbackQuiet remain available to buildCompletionDelivery', async () => {
+        const completionSource = await import('node:fs').then(fs =>
+            fs.promises.readFile(path.resolve(__dirname, '..', 'completion.mjs'), 'utf8')
+        );
         assert.ok(
-            indexSource.includes('formatCallbackTrigger') && indexSource.includes('formatCallbackQuiet'),
-            'Both formatters must still be exported/imported (buildCompletionDelivery uses them)'
+            completionSource.includes('export function formatCallbackTrigger') &&
+            completionSource.includes('export function formatCallbackQuiet'),
+            'Both formatters must still be exported from completion.mjs'
         );
     });
 
     it('finalizeRun does NOT embed "--- result ---" or ${result} in sendMessage', () => {
-        // The old patterns must not appear in the finalization path anymore.
         assert.ok(
-            !indexSource.includes('--- result ---'),
+            !finalizationSource.includes('--- result ---'),
             'finalizeRun must not embed "--- result ---" in sendMessage'
         );
-        // Check the finalizeRun function body for any template literal with result
-        const finalizeMatch = indexSource.match(/function finalizeRun\([\s\S]*?^\}/m);
+        const finalizeMatch = finalizationSource.match(/export function finalizeRun\([\s\S]*?^\}/m);
         if (finalizeMatch) {
             assert.ok(
                 !finalizeMatch[0].includes('${result}'),

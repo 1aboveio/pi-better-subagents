@@ -38,8 +38,6 @@ export interface Usage {
 
 const DEFAULT_PARSE_TAIL_BYTES = 32 * 1024 * 1024; // 32 MiB
 const DEFAULT_RAW_TAIL_BYTES = 256 * 1024; // 256 KiB
-const COHERENCE_SCAN_CHUNK_BYTES = 64 * 1024; // 64 KiB
-const MAX_COHERENCE_EVENT_PREFIX_BYTES = 64 * 1024; // 64 KiB
 
 function envBytes(name: string, fallback: number): number {
     const raw = process.env[name];
@@ -164,142 +162,6 @@ export interface UnmatchedToolCall {
     toolName: string;
 }
 
-interface StreamCoherence {
-    sawEnd: boolean;
-    unmatchedToolCalls: UnmatchedToolCall[];
-    error?: string;
-}
-
-interface MutableStreamCoherence {
-    sawEnd: boolean;
-    openToolCalls: Map<string, UnmatchedToolCall>;
-    anonymousToolCall: number;
-}
-
-function stringField(event: Record<string, unknown>, field: string): string | undefined {
-    return typeof event[field] === "string" ? event[field] : undefined;
-}
-
-function trackCoherenceEvent(event: Record<string, unknown>, coherence: MutableStreamCoherence): void {
-    const type = stringField(event, "type");
-    if (type === "agent_end" || type === "agent_settled") coherence.sawEnd = true;
-
-    const toolCallId = stringField(event, "toolCallId");
-    if (type === "tool_execution_start") {
-        const toolName = stringField(event, "toolName") ?? "unknown";
-        coherence.openToolCalls.set(
-            toolCallId ?? `anonymous:${coherence.anonymousToolCall++}`,
-            { id: toolCallId, toolName },
-        );
-    }
-    if (type === "tool_execution_end") {
-        if (toolCallId) {
-            coherence.openToolCalls.delete(toolCallId);
-        } else {
-            const toolName = stringField(event, "toolName");
-            if (toolName) {
-                const matching = [...coherence.openToolCalls].find(([, call]) => call.toolName === toolName);
-                if (matching) coherence.openToolCalls.delete(matching[0]);
-            }
-        }
-    }
-}
-
-/** Extract known event metadata from a bounded prefix of an oversized NDJSON record. */
-function jsonStringField(line: string, field: string): string | undefined {
-    const match = line.match(new RegExp(`"${field}"\\s*:\\s*("(?:\\\\.|[^"\\\\])*")`));
-    if (!match) return undefined;
-    try { return JSON.parse(match[1]); } catch { return undefined; }
-}
-
-function parseCoherenceEvent(line: string, truncated: boolean): Record<string, unknown> | undefined {
-    const text = line.trim();
-    if (!text || text[0] !== "{") return undefined;
-    if (!truncated) {
-        try { return JSON.parse(text); } catch { return undefined; }
-    }
-
-    // Pi writes event metadata at the start of each record. For an oversized
-    // payload, retain only that bounded metadata rather than rebuilding output.
-    const type = jsonStringField(text, "type");
-    if (!type) return undefined;
-    return {
-        type,
-        toolCallId: jsonStringField(text, "toolCallId"),
-        toolName: jsonStringField(text, "toolName"),
-    };
-}
-
-/**
- * Scan every NDJSON record for terminal and tool-execution coherence without
- * retaining assistant content. Record prefixes and read buffers are bounded.
- */
-function scanStreamCoherence(path: string): StreamCoherence {
-    const coherence: MutableStreamCoherence = {
-        sawEnd: false,
-        openToolCalls: new Map<string, UnmatchedToolCall>(),
-        anonymousToolCall: 0,
-    };
-    let fd: number;
-    try {
-        fd = openSync(path, "r");
-    } catch (e) {
-        return { sawEnd: false, unmatchedToolCalls: [], error: `open failed: ${(e as Error).message}` };
-    }
-
-    const buffer = Buffer.alloc(COHERENCE_SCAN_CHUNK_BYTES);
-    let lineParts: Buffer[] = [];
-    let lineBytes = 0;
-    let lineTruncated = false;
-    const appendLineBytes = (bytes: Buffer): void => {
-        if (lineTruncated || bytes.length === 0) return;
-        const remaining = MAX_COHERENCE_EVENT_PREFIX_BYTES - lineBytes;
-        if (remaining <= 0) {
-            lineTruncated = true;
-            return;
-        }
-        const kept = bytes.subarray(0, remaining);
-        lineParts.push(kept);
-        lineBytes += kept.length;
-        if (kept.length < bytes.length) lineTruncated = true;
-    };
-    const finishLine = (): void => {
-        if (lineBytes > 0 || lineTruncated) {
-            const event = parseCoherenceEvent(Buffer.concat(lineParts).toString("utf-8"), lineTruncated);
-            if (event) trackCoherenceEvent(event, coherence);
-        }
-        lineParts = [];
-        lineBytes = 0;
-        lineTruncated = false;
-    };
-
-    try {
-        while (true) {
-            const count = readSync(fd, buffer, 0, buffer.length, null);
-            if (count === 0) break;
-            let start = 0;
-            for (let i = 0; i < count; i++) {
-                if (buffer[i] !== 0x0a) continue;
-                appendLineBytes(buffer.subarray(start, i));
-                finishLine();
-                start = i + 1;
-            }
-            appendLineBytes(buffer.subarray(start, count));
-        }
-        finishLine();
-    } catch (e) {
-        return {
-            sawEnd: false,
-            unmatchedToolCalls: [],
-            error: `read failed: ${(e as Error).message}`,
-        };
-    } finally {
-        closeSync(fd);
-    }
-
-    return { sawEnd: coherence.sawEnd, unmatchedToolCalls: [...coherence.openToolCalls.values()] };
-}
-
 export interface ParsedRun {
     /** Final assistant answer (empty until the run produces one). */
     finalText: string;
@@ -317,12 +179,323 @@ export interface ParsedRun {
     diagnostics: string[];
 }
 
+/**
+ * Authoritative lifecycle evidence scanned from the complete NDJSON stream.
+ * Kept separate from parseRun()'s bounded tail so large-log result parsing stays
+ * memory-safe while clean completion still requires full-stream tool balance.
+ */
+export interface LifecycleEvidence {
+    sawEnd: boolean;
+    unmatchedToolCalls: UnmatchedToolCall[];
+    /** True when the full file was readable end-to-end. */
+    complete: boolean;
+    diagnostics: string[];
+}
+
+/** Fixed read size for lifecycle authority scans. Exported for memory-bound tests. */
+export const LIFECYCLE_SCAN_CHUNK_BYTES = 64 * 1024;
+/**
+ * Max prefix retained for one NDJSON record while hunting lifecycle fields.
+ * Large single-line events never grow an in-memory leftover beyond this bound;
+ * payloads after the prefix are discarded until the next newline.
+ */
+export const LIFECYCLE_RECORD_PREFIX_BYTES = 4 * 1024;
+
+function emptyLifecycleEvidence(diagnostics: string[] = []): LifecycleEvidence {
+    return { sawEnd: false, unmatchedToolCalls: [], complete: false, diagnostics };
+}
+
+function applyLifecycleFields(
+    fields: { type?: string; toolCallId?: string; toolName?: string },
+    openToolCalls: Map<string, UnmatchedToolCall>,
+    state: { sawEnd: boolean; anonymousToolCall: number },
+): void {
+    const type = fields.type;
+    if (!type) return;
+    if (type === "agent_end" || type === "agent_settled") state.sawEnd = true;
+
+    const toolCallId = fields.toolCallId;
+    if (type === "tool_execution_start") {
+        const toolName = fields.toolName ?? "unknown";
+        openToolCalls.set(toolCallId ?? `anonymous:${state.anonymousToolCall++}`, {
+            id: toolCallId,
+            toolName,
+        });
+    }
+    if (type === "tool_execution_end") {
+        if (toolCallId) {
+            openToolCalls.delete(toolCallId);
+        } else if (fields.toolName) {
+            const matching = [...openToolCalls].find(([, call]) => call.toolName === fields.toolName);
+            if (matching) openToolCalls.delete(matching[0]);
+        }
+    }
+}
+
+function applyLifecycleLine(
+    line: string,
+    openToolCalls: Map<string, UnmatchedToolCall>,
+    state: { sawEnd: boolean; anonymousToolCall: number },
+): void {
+    const s = line.trim();
+    if (!s || s[0] !== "{") return;
+    let e: Record<string, unknown>;
+    try { e = JSON.parse(s); } catch { return; }
+
+    applyLifecycleFields(
+        {
+            type: typeof e.type === "string" ? e.type : undefined,
+            toolCallId: typeof e.toolCallId === "string" ? e.toolCallId : undefined,
+            toolName: typeof e.toolName === "string" ? e.toolName : undefined,
+        },
+        openToolCalls,
+        state,
+    );
+}
+
+/**
+ * Pull only the top-level lifecycle strings from a record prefix.
+ * Never JSON.parses the payload, so huge agent_end/tool result bodies stay off-heap.
+ */
+function extractLifecycleFieldsFromPrefix(prefix: string): {
+    type?: string;
+    toolCallId?: string;
+    toolName?: string;
+    /** True when the prefix is a JSON object and a complete "type" string was found. */
+    foundType: boolean;
+    /** True when prefix looks like a JSON object start but type was not yet visible. */
+    looksLikeJsonObject: boolean;
+} {
+    const s = prefix.trimStart();
+    if (!s || s[0] !== "{") {
+        return { foundType: false, looksLikeJsonObject: false };
+    }
+
+    // Top-level string fields only. Values must be fully closed inside the prefix
+    // so a chunk boundary never yields a partial field value.
+    const typeMatch = /"type"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(s);
+    const toolCallIdMatch = /"toolCallId"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(s);
+    const toolNameMatch = /"toolName"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(s);
+
+    const unescapeJsonString = (raw: string): string => {
+        try {
+            return JSON.parse(`"${raw}"`) as string;
+        } catch {
+            return raw;
+        }
+    };
+
+    if (!typeMatch) {
+        return { foundType: false, looksLikeJsonObject: true };
+    }
+
+    return {
+        type: unescapeJsonString(typeMatch[1]),
+        toolCallId: toolCallIdMatch ? unescapeJsonString(toolCallIdMatch[1]) : undefined,
+        toolName: toolNameMatch ? unescapeJsonString(toolNameMatch[1]) : undefined,
+        foundType: true,
+        looksLikeJsonObject: true,
+    };
+}
+
+/**
+ * Stream the complete child log for lifecycle authority only.
+ * Reads fixed-size chunks and never retains more than a small per-record prefix,
+ * so large newline-free NDJSON events cannot grow heap with the event payload.
+ * When a record is capped without extractable lifecycle fields, evidence is marked
+ * incomplete so classification fails closed.
+ */
+export function scanLifecycleEvidence(id: string): LifecycleEvidence {
+    const path = logPathFor(id);
+    let totalBytes = 0;
+    try {
+        totalBytes = statSync(path).size;
+    } catch {
+        return emptyLifecycleEvidence(["Lifecycle scan failed: log not found"]);
+    }
+    if (totalBytes === 0) {
+        return { sawEnd: false, unmatchedToolCalls: [], complete: true, diagnostics: [] };
+    }
+
+    let fd: number;
+    try {
+        fd = openSync(path, "r");
+    } catch (e) {
+        return emptyLifecycleEvidence([`Lifecycle scan failed: open failed: ${(e as Error).message}`]);
+    }
+
+    const openToolCalls = new Map<string, UnmatchedToolCall>();
+    const state = { sawEnd: false, anonymousToolCall: 0 };
+    const diagnostics: string[] = [];
+    const buf = Buffer.alloc(Math.min(LIFECYCLE_SCAN_CHUNK_BYTES, totalBytes));
+    let offset = 0;
+    let leftover = "";
+    let skipToNewline = false;
+    let currentRecordApplied = false;
+    let complete = true;
+
+    const markCappedUnknown = (): void => {
+        complete = false;
+        const msg = "Lifecycle scan capped oversized NDJSON record without extractable fields";
+        if (!diagnostics.includes(msg)) diagnostics.push(msg);
+    };
+
+    const applyPrefixAndSkip = (prefix: string): void => {
+        if (!currentRecordApplied) {
+            const fields = extractLifecycleFieldsFromPrefix(prefix);
+            if (fields.foundType) {
+                applyLifecycleFields(fields, openToolCalls, state);
+            } else if (fields.looksLikeJsonObject) {
+                // JSON-looking record larger than the prefix with no visible type:
+                // refuse clean completion rather than guessing.
+                markCappedUnknown();
+            }
+            currentRecordApplied = true;
+        }
+        leftover = "";
+        skipToNewline = true;
+    };
+
+    try {
+        while (offset < totalBytes) {
+            const toRead = Math.min(buf.length, totalBytes - offset);
+            let read = 0;
+            try {
+                read = readSync(fd, buf, 0, toRead, offset);
+            } catch (e) {
+                return emptyLifecycleEvidence([
+                    `Lifecycle scan failed: read failed: ${(e as Error).message}`,
+                ]);
+            }
+            if (read <= 0) break;
+            offset += read;
+
+            let chunk = buf.toString("utf-8", 0, read);
+            let cursor = 0;
+            while (cursor < chunk.length) {
+                if (skipToNewline) {
+                    const nl = chunk.indexOf("\n", cursor);
+                    if (nl === -1) {
+                        cursor = chunk.length;
+                        break;
+                    }
+                    cursor = nl + 1;
+                    skipToNewline = false;
+                    currentRecordApplied = false;
+                    continue;
+                }
+
+                const nl = chunk.indexOf("\n", cursor);
+                if (nl !== -1) {
+                    const line = leftover + chunk.slice(cursor, nl);
+                    leftover = "";
+                    cursor = nl + 1;
+                    if (!currentRecordApplied) {
+                        if (line.length <= LIFECYCLE_RECORD_PREFIX_BYTES) {
+                            applyLifecycleLine(line, openToolCalls, state);
+                        } else {
+                            // Full line exceeded the prefix bound; still only keep fields.
+                            const fields = extractLifecycleFieldsFromPrefix(
+                                line.slice(0, LIFECYCLE_RECORD_PREFIX_BYTES),
+                            );
+                            if (fields.foundType) {
+                                applyLifecycleFields(fields, openToolCalls, state);
+                            } else if (fields.looksLikeJsonObject) {
+                                markCappedUnknown();
+                            }
+                        }
+                    }
+                    currentRecordApplied = false;
+                    continue;
+                }
+
+                // No newline in the remainder of this chunk from `cursor`.
+                const rest = chunk.slice(cursor);
+                if (leftover.length + rest.length <= LIFECYCLE_RECORD_PREFIX_BYTES) {
+                    leftover += rest;
+                    cursor = chunk.length;
+                } else {
+                    // Cap retained prefix, extract lifecycle fields, discard payload.
+                    const need = Math.max(0, LIFECYCLE_RECORD_PREFIX_BYTES - leftover.length);
+                    const prefix = need > 0 ? leftover + rest.slice(0, need) : leftover;
+                    applyPrefixAndSkip(prefix);
+                    // Still consume any newline that lives later in this same chunk.
+                    cursor += need;
+                    const nlInRest = chunk.indexOf("\n", cursor);
+                    if (nlInRest !== -1) {
+                        cursor = nlInRest + 1;
+                        skipToNewline = false;
+                        currentRecordApplied = false;
+                    } else {
+                        cursor = chunk.length;
+                    }
+                }
+            }
+            // Drop the chunk string promptly; only leftover/prefix state survives.
+            chunk = "";
+        }
+
+        if (!skipToNewline && leftover && !currentRecordApplied) {
+            if (leftover.length <= LIFECYCLE_RECORD_PREFIX_BYTES) {
+                applyLifecycleLine(leftover, openToolCalls, state);
+            } else {
+                const fields = extractLifecycleFieldsFromPrefix(
+                    leftover.slice(0, LIFECYCLE_RECORD_PREFIX_BYTES),
+                );
+                if (fields.foundType) {
+                    applyLifecycleFields(fields, openToolCalls, state);
+                } else if (fields.looksLikeJsonObject) {
+                    markCappedUnknown();
+                }
+            }
+        } else if (skipToNewline && !currentRecordApplied) {
+            // EOF mid-record after cap without fields — already handled by applyPrefixAndSkip.
+        }
+    } finally {
+        closeSync(fd);
+    }
+
+    return {
+        sawEnd: state.sawEnd,
+        unmatchedToolCalls: [...openToolCalls.values()],
+        complete,
+        diagnostics,
+    };
+}
+
+/** Overlay full-stream lifecycle fields onto a bounded parseRun result. */
+export function withLifecycleEvidence(run: ParsedRun, evidence: LifecycleEvidence): ParsedRun {
+    const diagnostics = [...run.diagnostics];
+    for (const d of evidence.diagnostics) {
+        if (!diagnostics.includes(d)) diagnostics.push(d);
+    }
+    // When the full stream could not be read, refuse clean completion by clearing
+    // terminal evidence even if the bounded tail looked coherent.
+    if (!evidence.complete) {
+        return {
+            ...run,
+            sawEnd: false,
+            unmatchedToolCalls: evidence.unmatchedToolCalls,
+            diagnostics,
+        };
+    }
+    return {
+        ...run,
+        sawEnd: evidence.sawEnd,
+        unmatchedToolCalls: evidence.unmatchedToolCalls,
+        diagnostics,
+    };
+}
+
+/** Bounded output parse + authoritative full-stream lifecycle evidence. */
+export function parseRunForLifecycle(id: string): ParsedRun {
+    return withLifecycleEvidence(parseRun(id), scanLifecycleEvidence(id));
+}
+
 /** Parse the log for run `id`. Tolerant of partial/streaming logs. */
 export function parseRun(id: string): ParsedRun {
-    const usage: Usage = { input: 0, output: 0, cacheRead: 0, total: 0, costUSD: 0 };
-    const path = logPathFor(id);
-    const tail = readTail(path, maxParseBytes());
-    const coherence = scanStreamCoherence(path);
+    const usage: Usage = { input: 0, output: 0, cacheRead: 0, costUSD: 0, total: 0 };
+    const tail = readTail(logPathFor(id), maxParseBytes());
     const diagnostics: string[] = [];
 
     // For NDJSON parsing we need complete lines; drop an initial partial line
@@ -349,11 +522,13 @@ export function parseRun(id: string): ParsedRun {
             "Only recent activity is reflected in tokens/tools.",
         );
     }
-    if (coherence.error) diagnostics.push(`Event coherence scan unreadable: ${coherence.error}`);
 
     let finalText = "";
     let lastActivity = "";
     const toolCalls: string[] = [];
+    const openToolCalls = new Map<string, UnmatchedToolCall>();
+    let anonymousToolCall = 0;
+    let sawEnd = false;
 
     for (const line of parseText.split("\n")) {
         const s = line.trim();
@@ -371,7 +546,9 @@ export function parseRun(id: string): ParsedRun {
                     if (m?.role === "assistant") { const t = messageText(m); if (t) finalText = t; break; }
                 }
             }
+            sawEnd = true;
         }
+        if (type === "agent_settled") sawEnd = true;
 
         // Progress signal + fallback final: finalized assistant turns.
         // Accumulate spend from `message_end` only (fires once per turn), so
@@ -417,6 +594,15 @@ export function parseRun(id: string): ParsedRun {
         if (type === "tool_execution_start") {
             const toolName = typeof e.toolName === "string" ? e.toolName : "unknown";
             if (toolCalls[toolCalls.length - 1] !== toolName) toolCalls.push(toolName);
+            openToolCalls.set(toolCallId ?? `anonymous:${anonymousToolCall++}`, { id: toolCallId, toolName });
+        }
+        if (type === "tool_execution_end") {
+            if (toolCallId) {
+                openToolCalls.delete(toolCallId);
+            } else if (typeof e.toolName === "string") {
+                const matching = [...openToolCalls].find(([, call]) => call.toolName === e.toolName);
+                if (matching) openToolCalls.delete(matching[0]);
+            }
         }
     }
 
@@ -425,15 +611,7 @@ export function parseRun(id: string): ParsedRun {
     }
 
     usage.total = usage.input + usage.output;
-    return {
-        finalText,
-        lastActivity,
-        toolCalls,
-        unmatchedToolCalls: coherence.unmatchedToolCalls,
-        sawEnd: coherence.sawEnd,
-        usage,
-        diagnostics,
-    };
+    return { finalText, lastActivity, toolCalls, unmatchedToolCalls: [...openToolCalls.values()], sawEnd, usage, diagnostics };
 }
 /** Build the human-readable body for subagent_output. Exported for unit testing. */
 export function formatSubagentOutputBody(
