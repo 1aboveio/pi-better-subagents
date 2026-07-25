@@ -37,7 +37,7 @@ launch is the result · completion triggers fetch · the foreground never blocks
 | Tool | Blocks? | What it does |
 |------|---------|--------------|
 | `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `approve`, `allow_nested`. |
-| `subagent_list` | never | List running/finished runs with status, model, elapsed, and spend. |
+| `subagent_list` | never | List running/finished runs with status, model, elapsed, and spend. Params: `all`, `limit` (default 20, max 100; larger values are clamped), `status` (`running`, `completed`, `failed`, `killed`, `exited`). |
 | `subagent_output` | never | Tail a run's live output as it stands right now. |
 | `subagent_result` | never | Read a finished run's final output (says "still running" otherwise). |
 | `subagent_stop` | never | SIGTERM a running run's process group. |
@@ -205,7 +205,7 @@ reported per-request cost.
 
 ## Parent-process scoping
 
-The live widget, default `subagent_list`, concurrency cap, and `session_start` ticker only include runs this pi process spawned (`spawnPid === process.pid`). The on-disk registry stays machine-global for durability. Pass `subagent_list all:true` for a global view. Id-based `subagent_result` / `subagent_output` / `subagent_stop` still resolve any run id (cross-session recovery).
+The live widget, default `subagent_list`, concurrency cap, and `session_start` ticker only include runs this pi process spawned (`spawnPid === process.pid`). The on-disk registry stays machine-global for durability. `subagent_list` shows newest runs first and is capped at 20 rows by default; pass `limit:N` to request fewer or more rows, up to the documented maximum of 100 (larger values are clamped with a clear note). Pass `all:true` for a global view; it still respects the default or explicit limit. Pass `status:[...]` to filter by effective status: `running`, `completed`, `failed`, `killed`, or transient `exited`. Id-based `subagent_result` / `subagent_output` / `subagent_stop` still resolve any run id (cross-session recovery).
 
 ## Install
 

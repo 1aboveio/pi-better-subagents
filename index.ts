@@ -46,6 +46,12 @@ import {
     nextWidgetAction,
     isSpendCacheFresh,
 } from "./widget.ts";
+import {
+    SUBAGENT_LIST_DEFAULT_LIMIT,
+    SUBAGENT_LIST_MAX_LIMIT,
+    SUBAGENT_LIST_STATUSES,
+    buildSubagentList,
+} from "./list.ts";
 
 /** The tools this extension registers — excluded from children by default so a
  *  subagent cannot recursively spawn more subagents unless explicitly allowed. */
@@ -429,25 +435,26 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
         name: "subagent_list",
         label: "List Subagents",
-        description: "List background subagent runs (running and finished) with status and metadata. Non-blocking. Default: this parent process only. Pass all:true for machine-global.",
+        description:
+            `List background subagent runs with status and metadata. Non-blocking. ` +
+            `Default: this parent process only, newest first, limit ${SUBAGENT_LIST_DEFAULT_LIMIT}. ` +
+            `Pass all:true for machine-global; limit is clamped to max ${SUBAGENT_LIST_MAX_LIMIT}.`,
         promptSnippet: "List background subagent runs and their status",
         parameters: Type.Object({
             all: Type.Optional(Type.Boolean({ description: "If true, list every run on this machine. Default false = only runs spawned by this pi process." })),
+            limit: Type.Optional(Type.Number({ description: `Maximum rows to display (default ${SUBAGENT_LIST_DEFAULT_LIMIT}, max ${SUBAGENT_LIST_MAX_LIMIT}; larger values are clamped).` })),
+            status: Type.Optional(Type.Array(Type.String(), { description: `Effective statuses to include: ${SUBAGENT_LIST_STATUSES.join(", ")}.` })),
         }),
         async execute(_toolCallId, params) {
-            const p = (params ?? {}) as { all?: boolean };
-            const metas = p.all ? listMetas() : listMetas().filter((m) => ownedByThisParent(m));
-            if (metas.length === 0) return text(p.all ? "No subagent runs." : "No subagent runs for this parent process.");
-            const now = Date.now();
-            const rows = metas.map((m) => {
-                const st = effectiveStatus(m);
-                const el = fmtElapsed((m.endedAt ?? now) - m.startedAt);
-                const spend = fmtSpend(parseRun(m.id).usage);
-                const nm = m.name ? `${m.name} ` : "";
-                const stat = `${el}${spend ? ` · ${spend}` : ""}`;
-                return `• ${nm}${m.id}  [${st}]  ${m.model ?? "?"}  ${stat}\n    ${m.promptPreview.replace(/\s+/g, " ").slice(0, 100)}`;
-            });
-            return text(rows.join("\n"));
+            const p = (params ?? {}) as { all?: boolean; limit?: number; status?: string[] | string };
+            return text(buildSubagentList({
+                metas: listMetas(),
+                params: p,
+                parentPid: process.pid,
+                now: Date.now(),
+                statusOf: effectiveStatus,
+                usageById: (id: string) => parseRun(id).usage,
+            }));
         },
     });
 
