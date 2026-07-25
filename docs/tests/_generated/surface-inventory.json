@@ -56,6 +56,27 @@
       "class": "read",
       "path": "index.ts",
       "reachable": true
+    },
+    {
+      "id": "registry.dismissal",
+      "kind": "service",
+      "class": "mutation",
+      "path": "registry.ts",
+      "reachable": true
+    },
+    {
+      "id": "registry.navigator-visibility",
+      "kind": "service",
+      "class": "read",
+      "path": "registry.ts",
+      "reachable": true
+    },
+    {
+      "id": "stop.shared",
+      "kind": "service",
+      "class": "mutation",
+      "path": "stop.ts",
+      "reachable": true
     }
   ]
 }
