@@ -1,0 +1,1 @@
+Record the explicit #49 dependency inline because Mergify consumed the standalone Depends-On footer on the main-based fallback PR.
