@@ -14,6 +14,8 @@
 import { execSync } from "node:child_process";
 import { writeFileSync, mkdirSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@earendil-works/pi-ai";
 import { spawnDetached, type SpawnResult } from "./spawn.ts";
 import { parseRun, type Usage } from "./parse.ts";
@@ -35,6 +37,8 @@ import {
     effectiveStatus,
     ownedByThisParent,
     canExitFinalize,
+    navigatorVisibleRuns,
+    navigatorVisibleCount,
     type RunMeta,
 } from "./registry.ts";
 import {
@@ -70,10 +74,20 @@ import {
     WIDGET_CLEAR,
     fmtElapsed,
     fmtSpend,
+    shortModel,
     buildWidgetLines,
     nextWidgetAction,
     isSpendCacheFresh,
 } from "./widget.ts";
+import {
+    NAVIGATOR_STATUS_KEY,
+    navigatorFooterHint,
+    applyNavigatorFooter,
+    isNavigatorUiAvailable,
+    buildNavigatorRows,
+    installNavigatorEditor,
+    showNavigator,
+} from "./navigator.ts";
 
 /** The tools this extension registers — excluded from children by default so a
  *  subagent cannot recursively spawn more subagents unless explicitly allowed. */
@@ -265,6 +279,68 @@ export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void 
     spawnIdentityProbe = probe ?? realProcessProbe;
 }
 
+// ---- minimal subagent navigator (empty-editor ←, #45) --------------------
+//
+// Human-facing TUI surface, kept separate from the passive live widget (which
+// is untouched). Three glue points, all gated on isNavigatorUiAvailable so
+// print/RPC sessions never see any of it:
+//   1. footer hint `← subagents · N` via the DEFAULT footer status mechanism
+//      (setStatus — the full footer is never replaced);
+//   2. an editor wrapper that intercepts bare ← only when the editor is empty
+//      and visible runs exist, delegating everything else to the wrapped
+//      editor (composition via navigator.mjs, tested with fakes);
+//   3. a focused overlay (ctx.ui.custom(..., { overlay: true })) listing the
+//      #44 navigatorVisibleRuns newest first. List view has no timers — the
+//      refreshing detail view is #46.
+
+/** Last footer hint published (undefined ⇒ never set); dirty-check guard. */
+let lastNavigatorHint: string | null | undefined;
+
+/** Rows for the overlay: visible current-parent runs, newest first (#44 seam). */
+function navigatorRows() {
+    return buildNavigatorRows(navigatorVisibleRuns(listMetas()), {
+        effectiveStatus,
+        shortModel,
+        fmtElapsed,
+        spendFor: (m: RunMeta) => fmtSpend(parseRun(m.id).usage),
+    });
+}
+
+/** Open the focused navigator overlay. No-op without a UI or visible runs. */
+function openNavigator(ctx: ExtensionContext): void {
+    if (!isNavigatorUiAvailable(ctx)) return;
+    const rows = navigatorRows();
+    if (rows.length === 0) return;
+    try {
+        void showNavigator(ctx.ui, rows, { matchKey: matchesKey, truncate: truncateToWidth });
+    } catch { /* never let UI glue break the session */ }
+}
+
+/** Publish/clear the `← subagents · N` footer hint (dirty-checked). */
+function updateNavigatorFooter(ctx: ExtensionContext | undefined): void {
+    if (!isNavigatorUiAvailable(ctx)) return;
+    try {
+        const hint = navigatorFooterHint(navigatorVisibleCount(listMetas()));
+        if (hint === lastNavigatorHint) return;
+        applyNavigatorFooter(ctx!.ui, navigatorVisibleCount(listMetas()));
+        lastNavigatorHint = hint;
+    } catch { /* ignore */ }
+}
+
+/** Install the empty-editor ← wrapper once per UI (reload-safe, composable). */
+function installNavigator(ctx: ExtensionContext): void {
+    if (!isNavigatorUiAvailable(ctx)) return;
+    try {
+        installNavigatorEditor(ctx.ui, {
+            createDefaultEditor: (tui: any, theme: any, keybindings: any) =>
+                new CustomEditor(tui, theme, keybindings),
+            isOpenTrigger: (data: string) => matchesKey(data, Key.left),
+            canOpen: () => navigatorVisibleCount(listMetas()) > 0,
+            onOpen: () => openNavigator(ctx),
+        });
+    } catch { /* ignore */ }
+}
+
 /** Resolve the pi binary once per session. */
 let cachedPi: string | undefined;
 function resolvePiBinary(): string {
@@ -441,6 +517,8 @@ export default function (pi: ExtensionAPI) {
         ensureTicker();
         // Start periodic supervision reconciliation (self-stops when idle).
         ensureHealthTicker();
+        // Footer hint: a visible run now exists, so `← subagents · N` shows.
+        updateNavigatorFooter(ctx);
 
         const runtime = resolution.mode === "inherit"
             ? `Runtime: ALL installed extensions (inheritExtensions) — mid-turn drain risk\n`
@@ -693,6 +771,14 @@ export default function (pi: ExtensionAPI) {
     // "no background resources at load" rule.
     pi.on("session_start", async (_event, ctx) => {
         uiCtx = ctx;
+        // Navigator: footer hint + empty-editor ← wrapper (TUI only; both
+        // no-op in print/RPC). Install is reload-safe and composes with any
+        // editor component another extension configured.
+        installNavigator(ctx);
+        // pi clears extension statuses on session switch/reload, so republish
+        // unconditionally here (the dirty-check only dedupes within a session).
+        lastNavigatorHint = undefined;
+        updateNavigatorFooter(ctx);
         if (listMetas().some((m) => ownedByThisParent(m) && effectiveStatus(m) === "running")) ensureTicker();
         else renderWidget();
         // Resume supervision reconciliation across /reload while current-parent
@@ -705,7 +791,15 @@ export default function (pi: ExtensionAPI) {
         stopTicker();
         stopHealthTicker();
         spendCache.clear();
+        // Widget clear is intentional in every mode that exposes ui (incl. RPC
+        // — pi docs: setWidget works in both TUI and RPC). Navigator cleanup
+        // is TUI-only: the footer hint is never published outside TUI, so
+        // clearing it in RPC would be a pure UI leak (setStatus subagents-nav).
         try { ctx.ui.setWidget("subagents", WIDGET_CLEAR); } catch { /* ignore */ }
+        if (isNavigatorUiAvailable(ctx)) {
+            try { ctx.ui.setStatus(NAVIGATOR_STATUS_KEY, undefined); } catch { /* ignore */ }
+        }
+        lastNavigatorHint = undefined;
         lastWidgetLines = undefined;
     });
 }

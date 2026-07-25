@@ -98,6 +98,27 @@
       "class": "mutation",
       "path": "tools.ts",
       "reachable": true
+    },
+    {
+      "id": "navigator.footer-hint",
+      "kind": "service",
+      "class": "mutation",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.editor-wrapper",
+      "kind": "service",
+      "class": "mutation",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.overlay",
+      "kind": "service",
+      "class": "read",
+      "path": "navigator.mjs",
+      "reachable": true
     }
   ]
 }
