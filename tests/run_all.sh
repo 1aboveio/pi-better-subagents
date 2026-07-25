@@ -18,6 +18,7 @@ tests=(
     "$DIR/test_web_fetch.sh"
     "$DIR/test_gh_issues.sh"
     "$DIR/test_env_inherit.sh"
+    "$DIR/test_headless_isolation.sh"
 )
 declare -a results
 fail=0
