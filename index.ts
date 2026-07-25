@@ -15,7 +15,7 @@ import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
-import { spawnDetached, killProcessTree } from "./spawn.ts";
+import { spawnDetached } from "./spawn.ts";
 import { parseRun, type Usage } from "./parse.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
@@ -35,6 +35,7 @@ import {
     ownedByThisParent,
     type RunMeta,
 } from "./registry.ts";
+import { stopRun } from "./stop.ts";
 import { formatCallbackTrigger, formatCallbackQuiet, buildCompletionDelivery } from "./completion.ts";
 import {
     SPINNER,
@@ -535,15 +536,12 @@ export default function (pi: ExtensionAPI) {
         }),
         async execute(_id, params) {
             const p = params as { id: string };
-            const meta = readMeta(p.id);
-            if (!meta) throw new Error(`Unknown run id: ${p.id}`);
-            if (effectiveStatus(meta) !== "running") {
-                return text(`Run ${p.id} is not running (${effectiveStatus(meta)}).`);
+            // Shared stop semantics with the TUI navigator close action (#44):
+            // stopRun rereads meta + effective status from disk before acting.
+            const outcome = stopRun(p.id);
+            if (outcome.action === "not-running") {
+                return text(`Run ${p.id} is not running (${outcome.status}).`);
             }
-            killProcessTree(meta.pid, "SIGTERM");
-            meta.status = "killed";
-            meta.endedAt = Date.now();
-            writeMeta(meta);
             renderWidget();
             return text(`Stopped subagent ${p.id}.`);
         },
