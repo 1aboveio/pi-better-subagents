@@ -20,13 +20,15 @@ if [ -z "${GH_TOKEN:-}" ]; then
 fi
 
 ID="test_ghissues_$$"
+WORK="$RUNTIME/ghissues_work_$$"
 # Use --json/--jq so the command ALWAYS prints a number (0 when there are no
 # issues). Plain `gh issue list` prints nothing on an empty repo, which the model
 # misreads as an error and then loops investigating.
 run_child "$ID" "read,bash" \
     "Run this exact bash command with no extra arguments or trailing punctuation:
 gh issue list -R 1aboveio/pi-better-subagents --state open --json number --jq length
-It prints the number of open issues (0 means none — a valid answer, not an error). Then report the count in one sentence like: There are N open issues in 1aboveio/pi-better-subagents"
+It prints the number of open issues (0 means none — a valid answer, not an error). Then report the count in one sentence like: There are N open issues in 1aboveio/pi-better-subagents" \
+    "$WORK"
 rc=$?
 
 require_finished "gh issue list" "$ID" "$rc"

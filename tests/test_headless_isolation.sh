@@ -24,8 +24,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 test_banner "Scenario 6 — headless isolation survives parallel bash+read (#17)"
 
 ID="test_isolation_$$"
+WORK="$RUNTIME/isolation_work_$$"
 run_child "$ID" "read,bash,edit,write,web_search,web_fetch" \
-    "Do these steps in order. Step 1: in ONE single assistant message, issue TWO tool calls IN PARALLEL: bash running \`echo hi\`, and read on /etc/hosts. Step 2: call web_fetch on https://example.com. Then reply with DONE followed by the page's title."
+    "Do these steps in order. Step 1: in ONE single assistant message, issue TWO tool calls IN PARALLEL: bash running \`echo hi\`, and read on /etc/hosts. Step 2: call web_fetch on https://example.com. Then reply with DONE followed by the page's title." \
+    "$WORK"
 rc=$?
 
 require_finished "headless isolation" "$ID" "$rc"
