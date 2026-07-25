@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "headSha": "faa6a15a464de550d6aa86cb2e1700e94938e058",
+  "baseSha": "2fe2af573cfd3bb96db892b265a1e8e8524a267d",
+  "collectedAt": "2026-07-25T17:55:59.069Z",
+  "scan": {
+    "findingCounts": {},
+    "findings": [],
+    "leadCounts": {
+      "unanchored-pattern": 101,
+      "new-branch": 19,
+      "modifies-existing-behavior": 2
+    },
+    "leadCount": 122
+  },
+  "ci": {
+    "status": "not-collected",
+    "reason": "--no-ci"
+  },
+  "ingested": [
+    {
+      "name": "unit-tests",
+      "command": "node --test tests/*.test.mjs",
+      "result": "191/191 pass",
+      "status": "Pass",
+      "sha": "faa6a15a464de550d6aa86cb2e1700e94938e058"
+    },
+    {
+      "name": "runtime-smoke",
+      "command": "node docs/tests/issue-48-runtime-smoke.mjs",
+      "result": "navigator.hardening pass",
+      "status": "Pass",
+      "sha": "faa6a15a464de550d6aa86cb2e1700e94938e058"
+    },
+    {
+      "name": "coverage-checklist-validate",
+      "command": "node coverage-checklist.mjs validate docs/coverage-checklist-issue-48.md",
+      "result": "every row has a decision + evidence locator",
+      "status": "Pass",
+      "sha": "faa6a15a464de550d6aa86cb2e1700e94938e058"
+    },
+    {
+      "name": "lint-tests",
+      "command": "lint-tests.mjs --rules no-skip,no-fixed-timeout,no-empty-test,mock-internal-seam --diff 2fe2af573cfd3bb96db892b265a1e8e8524a267d",
+      "result": "0 violations",
+      "status": "Pass",
+      "sha": "faa6a15a464de550d6aa86cb2e1700e94938e058"
+    },
+    {
+      "name": "strip-types-check",
+      "command": "node --experimental-strip-types --check index.ts navigator.ts",
+      "result": "parse ok",
+      "status": "Pass",
+      "sha": "faa6a15a464de550d6aa86cb2e1700e94938e058"
+    }
+  ]
+}
