@@ -29,9 +29,11 @@ const RUNTIME = mkdtempSync(join(tmpdir(), "batch-spawn-e2e-"));
 process.env.TMPDIR = RUNTIME;
 
 // Stub packages are created in a temp stubs dir and symlinked into the repo's
-// node_modules so ESM resolution finds them for index.ts.
+// node_modules so ESM resolution finds them for index.ts. We never delete the
+// checkout's node_modules tree itself — only the symlinks we created.
 const STUBS_DIR = mkdtempSync(join(RUNTIME, "stubs-"));
 const NODE_MODULES = join(REPO_ROOT, "node_modules");
+const CREATED_STUB_LINKS = [];
 
 function ensureStub(name, files) {
     const pkgDir = join(STUBS_DIR, name);
@@ -49,6 +51,7 @@ function ensureStub(name, files) {
     const linkPath = join(NODE_MODULES, name);
     try { rmSync(linkPath, { recursive: true, force: true }); } catch {}
     symlinkSync(pkgDir, linkPath, "dir");
+    CREATED_STUB_LINKS.push(linkPath);
 }
 
 function clearRuns() {
@@ -96,6 +99,9 @@ export const Type = {
 
 function fakePiScript() {
     return `#!/bin/bash
+if [ -n "$PI_SLEEP_SECONDS" ]; then
+  sleep "$PI_SLEEP_SECONDS"
+fi
 id=""
 sess=""
 while [[ $# -gt 0 ]]; do
@@ -145,6 +151,15 @@ function loadExtension(mod) {
     return { tools, messages };
 }
 
+async function waitForFinished(readMeta, id, { maxAttempts = 20, delayMs = 25 } = {}) {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const meta = readMeta(id);
+        if (meta && meta.status !== "running") return meta;
+        await new Promise((r) => setTimeout(r, delayMs));
+    }
+    throw new Error(`run ${id} did not finish in time`);
+}
+
 describe("subagent_spawn_batch end-to-end", () => {
     let origPath;
     let mod;
@@ -165,8 +180,10 @@ describe("subagent_spawn_batch end-to-end", () => {
 
     after(() => {
         process.env.PATH = origPath;
+        for (const link of CREATED_STUB_LINKS) {
+            try { rmSync(link, { recursive: true, force: true }); } catch {}
+        }
         rmSync(RUNTIME, { recursive: true, force: true });
-        try { rmSync(NODE_MODULES, { recursive: true, force: true }); } catch {}
     });
 
     it("launches multiple jobs and records batchId/batchName in each meta", async () => {
@@ -177,7 +194,7 @@ describe("subagent_spawn_batch end-to-end", () => {
             "tc1",
             {
                 batchName: "reviewers",
-                shared: { model: "test/model", tools: "read,bash" },
+                shared: { model: "test/model", tools: "read,bash", sandbox: false },
                 jobs: [
                     { prompt: "say hello" },
                     { prompt: "say world" },
@@ -217,7 +234,7 @@ describe("subagent_spawn_batch end-to-end", () => {
             () =>
                 tools.subagent_spawn_batch.execute(
                     "tc2",
-                    { shared: { tools: "read,bash" }, jobs: [{ prompt: "overflow" }] },
+                    { shared: { tools: "read,bash", sandbox: false }, jobs: [{ prompt: "overflow" }] },
                     null,
                     null,
                     ctx,
@@ -238,7 +255,7 @@ describe("subagent_spawn_batch end-to-end", () => {
         const res = await tools.subagent_spawn_batch.execute(
             "tc3",
             {
-                shared: { tools: "read,bash" },
+                shared: { tools: "read,bash", sandbox: false },
                 jobs: [{ prompt: "a" }, { prompt: "b" }],
                 onCapacity: "launch-available",
             },
@@ -252,16 +269,135 @@ describe("subagent_spawn_batch end-to-end", () => {
         assert.match(text, /Skipped \(capacity\): job-2/);
     });
 
+    it("launch-available reports per-job launch failures without stopping successful launches", async () => {
+        const { tools } = loadExtension(mod);
+        const ctx = makeCtx();
+
+        // Point the extension package lookup to a temp dir so the mapped
+        // extension for web_fetch is reported missing, causing only that job
+        // to fail while the read,bash job launches normally.
+        const fakeAgentDir = mkdtempSync(join(RUNTIME, "fake-agent-"));
+        const origAgentDir = process.env.PI_CODING_AGENT_DIR;
+        process.env.PI_CODING_AGENT_DIR = fakeAgentDir;
+        try {
+            const res = await tools.subagent_spawn_batch.execute(
+                "tc3b",
+                {
+                    shared: { model: "test/model", sandbox: false },
+                    jobs: [
+                        { prompt: "a", tools: "read,bash" },
+                        { prompt: "b", tools: "web_fetch" },
+                    ],
+                    onCapacity: "launch-available",
+                },
+                null,
+                null,
+                ctx,
+            );
+
+            const text = res.content[0].text;
+            assert.match(text, /launched 1 subagent\(s\):/i);
+            assert.match(text, /Failed \(1\): job-2: .*@juicesharp\/rpiv-web-tools/);
+            const launchedId = text.match(/→ (sa_[a-z0-9_]+)/)?.[1];
+            assert.ok(launchedId);
+            const meta = registry.readMeta(launchedId);
+            assert.equal(meta.status, "running");
+        } finally {
+            if (origAgentDir === undefined) {
+                delete process.env.PI_CODING_AGENT_DIR;
+            } else {
+                process.env.PI_CODING_AGENT_DIR = origAgentDir;
+            }
+        }
+    });
+
     it("single subagent_spawn still works and leaves batch fields empty", async () => {
         const { tools } = loadExtension(mod);
         const ctx = makeCtx();
 
-        const res = await tools.subagent_spawn.execute("tc", { prompt: "solo", tools: "read,bash" }, null, null, ctx);
+        const res = await tools.subagent_spawn.execute("tc", { prompt: "solo", tools: "read,bash", sandbox: false }, null, null, ctx);
         const text = res.content[0].text;
         const match = text.match(/id=(sa_[a-z0-9_]+)/);
         assert.ok(match);
         const meta = registry.readMeta(match[1]);
         assert.equal(meta.batchId, undefined);
         assert.equal(meta.batchName, undefined);
+    });
+
+    it("batch-launched run ids work with subagent_output", async () => {
+        const { tools } = loadExtension(mod);
+        const ctx = makeCtx();
+
+        const res = await tools.subagent_spawn_batch.execute(
+            "tc4",
+            {
+                shared: { tools: "read,bash", sandbox: false },
+                jobs: [{ prompt: "emit output" }],
+            },
+            null,
+            null,
+            ctx,
+        );
+        const id = res.content[0].text.match(/→ (sa_[a-z0-9_]+)/)?.[1];
+        assert.ok(id);
+
+        await waitForFinished(registry.readMeta, id);
+        const out = await tools.subagent_output.execute("tc4-out", { id });
+        const text = out.content[0].text;
+        assert.match(text, /completed/);
+        assert.match(text, /done/);
+    });
+
+    it("batch-launched run ids work with subagent_result after completion", async () => {
+        const { tools } = loadExtension(mod);
+        const ctx = makeCtx();
+
+        const res = await tools.subagent_spawn_batch.execute(
+            "tc5",
+            {
+                shared: { tools: "read,bash", sandbox: false },
+                jobs: [{ prompt: "finish and report" }],
+            },
+            null,
+            null,
+            ctx,
+        );
+        const id = res.content[0].text.match(/→ (sa_[a-z0-9_]+)/)?.[1];
+        assert.ok(id);
+
+        await waitForFinished(registry.readMeta, id);
+        const result = await tools.subagent_result.execute("tc5-result", { id });
+        const text = result.content[0].text;
+        assert.match(text, /completed/);
+        assert.match(text, /done/);
+    });
+
+    it("batch-launched run ids work with subagent_stop", async () => {
+        const { tools } = loadExtension(mod);
+        const ctx = makeCtx();
+
+        process.env.PI_SLEEP_SECONDS = "10";
+        try {
+            const res = await tools.subagent_spawn_batch.execute(
+                "tc6",
+                {
+                    shared: { tools: "read,bash", sandbox: false },
+                    jobs: [{ prompt: "sleep a while" }],
+                },
+                null,
+                null,
+                ctx,
+            );
+            const id = res.content[0].text.match(/→ (sa_[a-z0-9_]+)/)?.[1];
+            assert.ok(id);
+
+            const stop = await tools.subagent_stop.execute("tc6-stop", { id });
+            assert.match(stop.content[0].text, /Stopped subagent/);
+
+            const meta = registry.readMeta(id);
+            assert.equal(meta.status, "killed");
+        } finally {
+            delete process.env.PI_SLEEP_SECONDS;
+        }
     });
 });

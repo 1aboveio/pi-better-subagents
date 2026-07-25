@@ -8,6 +8,7 @@
  */
 
 import { BUILTIN_TOOLS } from "./extensions.mjs";
+import { SAFE_CLEAN_TOOLS } from "./config.ts";
 
 const VALID_CAPACITY_MODES = new Set(["reject", "launch-available"]);
 
@@ -77,9 +78,13 @@ export function validateBatchPlan({ shared, jobs, onCapacity, config }) {
                         "is invalid — clean children load no extensions, so nested subagent tools cannot exist.",
                 );
             }
-            const toolList = merged.tools
-                ? merged.tools.split(",").map((t) => t.trim()).filter(Boolean)
-                : [];
+            // Validate the effective tool allowlist, which resolves in this order:
+            // per-job tools → shared tools → config.defaultTools → clean-safe built-ins.
+            const rawTools = merged.tools ?? config?.defaultTools ?? SAFE_CLEAN_TOOLS;
+            const toolList = rawTools
+                .split(",")
+                .map((t) => t.trim())
+                .filter(Boolean);
             for (const tool of toolList) {
                 if (!BUILTIN_TOOLS.includes(tool)) {
                     throw new Error(
@@ -93,24 +98,30 @@ export function validateBatchPlan({ shared, jobs, onCapacity, config }) {
 }
 
 /**
- * Assign a display name to every job.
+ * Assign a globally-unique display name to every job.
  *   - missing name -> job-{index}
- *   - duplicate name -> name-2, name-3, ...
+ *   - duplicate name -> name-2, name-3, ... (skipping any already-used suffix)
+ *
+ * Suffixes are checked against the full set of assigned names so a raw name
+ * like "reviewer-2" cannot collide with the suffix generated for "reviewer".
  */
 export function assignBatchJobNames(jobs) {
-    const counts = new Map();
+    const used = new Set();
     const names = [];
 
     for (let i = 0; i < jobs.length; i++) {
-        const raw = jobs[i]?.name ?? `${BATCH_JOB_NAME_DEFAULT}-${i + 1}`;
-        const count = (counts.get(raw) ?? 0) + 1;
-        counts.set(raw, count);
-
-        if (count === 1) {
-            names.push(raw);
-        } else {
-            names.push(`${raw}-${count}`);
+        let raw = jobs[i]?.name ?? `${BATCH_JOB_NAME_DEFAULT}-${i + 1}`;
+        let name = raw;
+        if (used.has(name)) {
+            let suffix = 2;
+            name = `${raw}-${suffix}`;
+            while (used.has(name)) {
+                suffix += 1;
+                name = `${raw}-${suffix}`;
+            }
         }
+        used.add(name);
+        names.push(name);
     }
 
     return names;
@@ -154,12 +165,13 @@ export function planBatchLaunches({ jobs, runningCount, maxConcurrent, onCapacit
 /**
  * Format the launch response for subagent_spawn_batch.
  */
-export function formatBatchLaunchResponse({ batchId, batchName, launched, skipped }) {
+export function formatBatchLaunchResponse({ batchId, batchName, launched, skipped, failed }) {
     const lines = [];
     const label = batchName ? `${batchName} (${batchId})` : batchId;
 
     if (launched.length === 0) {
-        lines.push(`Batch ${label}: no jobs launched — capacity full.`);
+        const reason = skipped.length ? " — capacity full" : "";
+        lines.push(`Batch ${label}: no jobs launched${reason}.`);
     } else {
         lines.push(
             `Batch ${label} launched ${launched.length} subagent(s):`,
@@ -167,6 +179,14 @@ export function formatBatchLaunchResponse({ batchId, batchName, launched, skippe
         for (const { name, id } of launched) {
             lines.push(`• ${name} → ${id}`);
         }
+    }
+
+    if (failed?.length) {
+        lines.push(
+            `Failed (${failed.length}): ${failed
+                .map((f) => `${f.name}: ${f.reason}`)
+                .join("; ")}`,
+        );
     }
 
     if (skipped.length) {

@@ -66,6 +66,7 @@ import {
  *  subagent cannot recursively spawn more subagents unless explicitly allowed. */
 const SUBAGENT_TOOLS = [
     "subagent_spawn",
+    "subagent_spawn_batch",
     "subagent_list",
     "subagent_output",
     "subagent_stop",
@@ -488,16 +489,53 @@ export default function (pi: ExtensionAPI) {
             const batchId = nextBatchId();
 
             const launched: { name: string; id: string }[] = [];
-            for (const job of plan.toLaunch) {
+            const failed: { name: string; reason: string }[] = [];
+            for (let i = 0; i < plan.toLaunch.length; i++) {
+                const job = plan.toLaunch[i];
                 const index = p.jobs.indexOf(job);
                 const merged = mergeJobOptions(p.shared, job);
                 const name = names[index];
-                const { id } = await spawnSubagentRun(ctx, { ...merged, name }, { batchId, batchName: p.batchName });
-                launched.push({ name, id });
+
+                // Re-check capacity before each async launch. Between launches other
+                // subagent_spawn calls may have consumed slots; stop rather than exceed
+                // the configured cap. Already-launched runs are left running.
+                const currentRunning = listMetas().filter(
+                    (m) => ownedByThisParent(m) && effectiveStatus(m) === "running",
+                ).length;
+                if (currentRunning >= maxConcurrent) {
+                    const remaining = plan.toLaunch.slice(i).map((j) => ({
+                        name: names[p.jobs.indexOf(j)],
+                    }));
+                    if (p.onCapacity === "launch-available") {
+                        return text(formatBatchLaunchResponse({
+                            batchId, batchName: p.batchName, launched, skipped: [...plan.skipped.map((j) => ({ name: names[p.jobs.indexOf(j)] })), ...remaining], failed,
+                        }));
+                    }
+                    failed.push({ name, reason: "capacity exhausted by concurrent launches before this job could start" });
+                    return text(formatBatchLaunchResponse({
+                        batchId, batchName: p.batchName, launched, skipped: plan.skipped.map((j) => ({ name: names[p.jobs.indexOf(j)] })), failed,
+                    }));
+                }
+
+                try {
+                    const { id } = await spawnSubagentRun(ctx, { ...merged, name }, { batchId, batchName: p.batchName });
+                    launched.push({ name, id });
+                } catch (err) {
+                    const reason = err instanceof Error ? err.message : String(err);
+                    failed.push({ name, reason });
+                    if (p.onCapacity !== "launch-available") {
+                        // reject mode: the whole batch was supposed to fit; fail fast
+                        // and report what launched before the failure without stopping it.
+                        return text(formatBatchLaunchResponse({
+                            batchId, batchName: p.batchName, launched, skipped: plan.skipped.map((j) => ({ name: names[p.jobs.indexOf(j)] })), failed,
+                        }));
+                    }
+                    // launch-available: continue trying the rest so we maximize useful work.
+                }
             }
 
             const skipped = plan.skipped.map((job) => ({ name: names[p.jobs.indexOf(job)] }));
-            return text(formatBatchLaunchResponse({ batchId, batchName: p.batchName, launched, skipped }));
+            return text(formatBatchLaunchResponse({ batchId, batchName: p.batchName, launched, skipped, failed }));
         },
     });
 

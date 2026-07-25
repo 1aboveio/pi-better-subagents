@@ -201,6 +201,28 @@ describe("validateBatchPlan", () => {
             /clean:true with allow_nested:true/,
         );
     });
+
+    it("rejects clean:true when config.defaultTools contains an extension tool", () => {
+        assert.throws(
+            () =>
+                validateBatchPlan({
+                    shared: {},
+                    jobs: [{ prompt: "x", clean: true }],
+                    config: { ...CFG, defaultTools: "read,web_fetch" },
+                }),
+            /clean:true with extension-provided tool "web_fetch"/,
+        );
+    });
+
+    it("accepts clean:true when config.defaultTools contains only built-ins", () => {
+        assert.doesNotThrow(() =>
+            validateBatchPlan({
+                shared: {},
+                jobs: [{ prompt: "x", clean: true }],
+                config: { ...CFG, defaultTools: "read,bash" },
+            }),
+        );
+    });
 });
 
 describe("assignBatchJobNames", () => {
@@ -233,6 +255,18 @@ describe("assignBatchJobNames", () => {
             "reviewer",
             `${BATCH_JOB_NAME_DEFAULT}-3`,
         ]);
+    });
+
+    it("keeps generated suffixes globally unique even when raw names collide with suffixes", () => {
+        const jobs = [
+            { prompt: "a", name: "reviewer" },
+            { prompt: "b", name: "reviewer" },
+            { prompt: "c", name: "reviewer-2" },
+        ];
+        const names = assignBatchJobNames(jobs);
+        assert.deepEqual(names, ["reviewer", "reviewer-2", "reviewer-2-2"]);
+        const unique = new Set(names);
+        assert.equal(unique.size, names.length);
     });
 });
 
@@ -338,6 +372,20 @@ describe("formatBatchLaunchResponse", () => {
 
         assert.equal(text, "Batch batch_empty: no jobs launched — capacity full.\nSkipped (capacity): only");
     });
+
+    it("formats a launch with failed jobs", () => {
+        const text = formatBatchLaunchResponse({
+            batchId: "batch_fail",
+            launched: [{ name: "alice", id: "sa_1" }],
+            skipped: [{ name: "carol" }],
+            failed: [{ name: "bob", reason: "spawn exited with status 1" }],
+        });
+
+        assert.match(text, /Batch batch_fail launched 1 subagent\(s\):/);
+        assert.match(text, /• alice → sa_1/);
+        assert.match(text, /Failed \(1\): bob: spawn exited with status 1/);
+        assert.match(text, /Skipped \(capacity\): carol/);
+    });
 });
 
 describe("index.ts batch wiring", () => {
@@ -383,6 +431,15 @@ describe("index.ts batch wiring", () => {
         assert.ok(
             indexSource.includes("{ batchId, batchName: p.batchName }"),
             "batch info must be passed to each spawn",
+        );
+    });
+
+    // @covers subagent-spawn-batch.nesting-control
+    // @level unit
+    it("includes subagent_spawn_batch in the child nesting denylist", () => {
+        assert.ok(
+            indexSource.includes('"subagent_spawn_batch"'),
+            "SUBAGENT_TOOLS must include the batch tool so child recursion boundaries stay coherent",
         );
     });
 });
