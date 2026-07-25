@@ -1,0 +1,1 @@
+address review: compute terminal/tool coherence across the full NDJSON stream while preserving bounded assistant-output parsing; add the pre-window unmatched-start regression and update the fix-round contract
