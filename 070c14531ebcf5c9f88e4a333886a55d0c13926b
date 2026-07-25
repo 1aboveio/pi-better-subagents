@@ -1,0 +1,1 @@
+replace sudo-based gh install with pinned checksum-verified user-local Linux binary after queue retry failed
