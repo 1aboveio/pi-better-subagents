@@ -11,7 +11,7 @@
 - [x] Document raw non-JSON noise separately
 - [x] Write NOTES.md meaningful-activity + detectability verdicts
 - [x] Bounded redacted fixtures + validation test
-- [ ] Closeout: scope-class, scan-diff, PR + Review Contract
+- [x] Closeout: scope-class, scan-diff, PR #97 + Review Contract
 
 ## Non-goals
 
