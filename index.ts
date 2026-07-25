@@ -69,6 +69,7 @@ import {
     subagentResultTool,
     subagentStopTool,
 } from "./tools.ts";
+import { stopRun } from "./stop.ts";
 import {
     SPINNER,
     TICK_MS,
