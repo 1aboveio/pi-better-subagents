@@ -2,10 +2,15 @@
  * Complete first-class Git remote semantics for disposable clone workspaces.
  *
  * Invariant (`git-remote-preservation`, issue #103): disposable clone
- * preparation must preserve every source remote name, its fetch URL(s), and
- * **all** configured `remote.<name>.pushurl` values — not just the first.
- * Git pushes to every configured push destination; collapsing multi-pushurl
- * sets rewrites producer push topology.
+ * preparation must preserve every source remote name, **every** configured
+ * `remote.<name>.url` value, and **every** configured `remote.<name>.pushurl`
+ * value — not just the first of either. Git permits multi-valued keys for both:
+ *
+ * - With no explicit pushurl, `git remote get-url --push --all` returns all
+ *   fetch URLs and one `git push` reaches every URL.
+ * - With explicit pushurl(s), push uses those destinations only.
+ *
+ * Collapsing either multi-valued set rewrites producer push/fetch topology.
  *
  * Values are read from null-delimited `git config` output rather than
  * `git remote -v` line parsing, which drops any URL containing spaces.
@@ -15,14 +20,18 @@
 
 import { execFileSync } from "node:child_process";
 
-/** One configured Git remote, including every explicit push URL. */
+/** One configured Git remote, including every fetch URL and every explicit push URL. */
 export interface GitRemote {
     name: string;
-    /** Fetch URL (`remote.<name>.url`). Falls back to the first pushurl only if no fetch URL exists. */
-    url: string;
+    /**
+     * Every configured `remote.<name>.url`, in config order.
+     * Git fetches from the first and, when no pushurl is set, pushes to all.
+     */
+    urls: string[];
     /**
      * Every configured `remote.<name>.pushurl`, in config order.
-     * Empty when the remote has no explicit push URL (Git then pushes to `url`).
+     * Empty when the remote has no explicit push URL (Git then pushes to every
+     * entry in `urls`).
      */
     pushUrls: string[];
 }
@@ -45,7 +54,8 @@ function runGit(cwd: string, args: string[]): string {
  *
  * Uses `git config --null --get-regexp` so URL values may contain spaces, tabs,
  * or other whitespace without being truncated. Collects **every**
- * `remote.<name>.pushurl` entry (Git allows multiple and pushes to all).
+ * `remote.<name>.url` and **every** `remote.<name>.pushurl` entry (Git allows
+ * multiple of each; multi-url with no pushurl is a multi-destination push set).
  */
 export function readGitRemotes(dir: string): GitRemote[] {
     let raw: string;
@@ -67,7 +77,7 @@ export function readGitRemotes(dir: string): GitRemote[] {
     }
     if (!raw) return [];
 
-    const byName = new Map<string, { fetch?: string; push: string[] }>();
+    const byName = new Map<string, { fetch: string[]; push: string[] }>();
     for (const record of raw.split("\0")) {
         if (!record) continue;
         const nl = record.indexOf("\n");
@@ -81,10 +91,10 @@ export function readGitRemotes(dir: string): GitRemote[] {
         const match = key.match(/^remote\.(.+)\.(url|pushurl)$/);
         if (!match) continue;
         const [, name, kind] = match;
-        const entry = byName.get(name) ?? { push: [] };
+        const entry = byName.get(name) ?? { fetch: [], push: [] };
         if (kind === "url") {
-            // First configured fetch URL wins (matches git remote get-url).
-            if (entry.fetch === undefined) entry.fetch = value;
+            // Preserve every fetch URL in config order — do not collapse to one.
+            entry.fetch.push(value);
         } else {
             // Preserve every pushurl in config order — do not collapse to one.
             entry.push.push(value);
@@ -94,13 +104,19 @@ export function readGitRemotes(dir: string): GitRemote[] {
 
     const remotes: GitRemote[] = [];
     for (const [name, urls] of byName.entries()) {
-        // Prefer the fetch URL as the canonical remote URL; fall back to the
-        // first pushurl only when no fetch entry exists (unusual but legal).
-        const url = urls.fetch ?? urls.push[0];
-        if (!url) continue;
+        // Prefer configured fetch URLs. Unusual but legal: a remote with only
+        // pushurl keys and no url key — expose the first pushurl as urls[0] so
+        // the remote remains addressable, and keep the full push set in pushUrls.
+        const fetchUrls =
+            urls.fetch.length > 0
+                ? [...urls.fetch]
+                : urls.push.length > 0
+                  ? [urls.push[0]]
+                  : [];
+        if (fetchUrls.length === 0) continue;
         remotes.push({
             name,
-            url,
+            urls: fetchUrls,
             pushUrls: [...urls.push],
         });
     }
@@ -111,8 +127,8 @@ export function readGitRemotes(dir: string): GitRemote[] {
 
 /**
  * Make `targetDir`'s remotes match `sourceDir`'s complete remote contract:
- * names, fetch URLs, and every configured push URL. Removes stale remotes that
- * exist only on the target (typical after a path-style clone).
+ * names, every fetch URL, and every configured push URL. Removes stale remotes
+ * that exist only on the target (typical after a path-style clone).
  */
 export function syncGitRemotes(sourceDir: string, targetDir: string): void {
     const sourceRemotes = readGitRemotes(sourceDir);
@@ -130,12 +146,51 @@ export function syncGitRemotes(sourceDir: string, targetDir: string): void {
     for (const remote of sourceRemotes) {
         const existing = targetRemotes.find((entry) => entry.name === remote.name);
         if (!existing) {
-            runGit(targetDir, ["remote", "add", remote.name, remote.url]);
-        } else if (existing.url !== remote.url) {
-            runGit(targetDir, ["remote", "set-url", remote.name, remote.url]);
+            // Create the remote with the first fetch URL, then apply the full sets.
+            runGit(targetDir, ["remote", "add", remote.name, remote.urls[0]]);
+            applyFetchUrls(targetDir, remote.name, remote.urls, [remote.urls[0]]);
+        } else {
+            applyFetchUrls(targetDir, remote.name, remote.urls, existing.urls);
         }
 
         applyPushUrls(targetDir, remote.name, remote.pushUrls, existing?.pushUrls ?? []);
+    }
+}
+
+/**
+ * Replace the target remote's fetch URL set with `desired`.
+ *
+ * Same multi-value constraint as pushurls: `git remote set-url <name> <url>`
+ * fatals when the key already has multiple values. Always clear the complete
+ * existing url set first (`git config --unset-all`), then rebuild with
+ * set-url + --add. Never use regex `--delete` of URL text.
+ */
+function applyFetchUrls(
+    dir: string,
+    name: string,
+    desired: string[],
+    existing: string[],
+): void {
+    if (desired.length === 0) {
+        throw new Error(`remote.${name} has no fetch URLs to apply in ${dir}`);
+    }
+
+    // Fast path: already identical in order — nothing to do.
+    if (
+        existing.length === desired.length &&
+        existing.every((url, i) => url === desired[i])
+    ) {
+        return;
+    }
+
+    // Always clear the complete existing url set first. A bare `set-url`
+    // cannot replace a multi-valued set (Git fatals).
+    clearAllFetchUrls(dir, name);
+
+    // Rebuild desired ordered set: first set-url, then --add.
+    runGit(dir, ["remote", "set-url", name, desired[0]]);
+    for (let i = 1; i < desired.length; i++) {
+        runGit(dir, ["remote", "set-url", "--add", name, desired[i]]);
     }
 }
 
@@ -148,7 +203,7 @@ export function syncGitRemotes(sourceDir: string, targetDir: string): void {
  * fatal: could not set ...`). Always clear the complete existing pushurl
  * set first, then rebuild the desired ordered set with set-url + --add.
  * When the desired set is empty, every existing pushurl is deleted so push
- * falls back to the fetch URL.
+ * falls back to every configured fetch URL.
  */
 function applyPushUrls(
     dir: string,
@@ -166,25 +221,28 @@ function applyPushUrls(
 
     // Always clear the complete existing pushurl set first. A bare
     // `set-url --push` cannot replace a multi-valued set (Git fatals).
-    clearAllPushUrls(dir, name, existing);
+    clearAllPushUrls(dir, name);
 
     if (desired.length === 0) {
-        // Desired is empty: after unset-all, Git's default (push → fetch URL) holds.
-        // `get-url --push --all` reports the fetch URL when no pushurl key exists,
-        // so treat a single remaining entry equal to fetch as already-default.
+        // Desired is empty: after unset-all, Git's default (push → all fetch
+        // URLs) holds. `get-url --push --all` reports fetch URL(s) when no
+        // pushurl key exists, so treat remaining entries equal to fetch set
+        // as already-default.
         const remaining = safePushUrlsAll(dir, name);
-        const fetchUrl = safeFetchUrl(dir, name);
+        const fetchUrls = safeFetchUrlsAll(dir, name);
         const isDefaultOnly =
             remaining.length === 0 ||
-            (remaining.length === 1 && fetchUrl !== undefined && remaining[0] === fetchUrl);
+            (remaining.length === fetchUrls.length &&
+                remaining.every((url, i) => url === fetchUrls[i]));
         if (isDefaultOnly) return;
 
         // Retry once if values somehow remain (should not happen after unset-all).
-        clearAllPushUrls(dir, name, remaining);
+        clearAllPushUrls(dir, name);
         const still = safePushUrlsAll(dir, name);
         const stillDefaultOnly =
             still.length === 0 ||
-            (still.length === 1 && fetchUrl !== undefined && still[0] === fetchUrl);
+            (still.length === fetchUrls.length &&
+                still.every((url, i) => url === fetchUrls[i]));
         if (!stillDefaultOnly) {
             throw new Error(
                 `unable to clear multi-valued remote.${name}.pushurl in ${dir}`,
@@ -202,6 +260,26 @@ function applyPushUrls(
 }
 
 /**
+ * Delete every configured fetch URL for `name` as a complete set.
+ *
+ * Must NOT use `git remote set-url --delete <name> <url>`: that treats the
+ * final argument as a regex, so legal local paths containing unmatched
+ * metacharacters (e.g. `[`) fail to match and leave stale destinations intact.
+ * `git config --unset-all remote.<name>.url` drops the multi-valued key
+ * wholesale without interpreting URL text as a pattern.
+ *
+ * Note: after unset-all the remote still exists (fetch refspec remains) but
+ * has no url until rebuild. Callers must rebuild immediately.
+ */
+function clearAllFetchUrls(dir: string, name: string): void {
+    try {
+        runGit(dir, ["config", "--unset-all", `remote.${name}.url`]);
+    } catch {
+        // Key already absent (git exits non-zero) — nothing to clear.
+    }
+}
+
+/**
  * Delete every configured pushurl for `name` as a complete set.
  *
  * Must NOT use `git remote set-url --push --delete <name> <url>`: that treats
@@ -210,7 +288,7 @@ function applyPushUrls(
  * `git config --unset-all remote.<name>.pushurl` drops the multi-valued key
  * wholesale without interpreting URL text as a pattern.
  */
-function clearAllPushUrls(dir: string, name: string, _urls: string[] = []): void {
+function clearAllPushUrls(dir: string, name: string): void {
     try {
         runGit(dir, ["config", "--unset-all", `remote.${name}.pushurl`]);
     } catch {
@@ -230,10 +308,14 @@ function safePushUrlsAll(dir: string, name: string): string[] {
     }
 }
 
-function safeFetchUrl(dir: string, name: string): string | undefined {
+function safeFetchUrlsAll(dir: string, name: string): string[] {
     try {
-        return runGit(dir, ["remote", "get-url", name]);
+        const out = runGit(dir, ["remote", "get-url", "--all", name]);
+        return out
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean);
     } catch {
-        return undefined;
+        return [];
     }
 }

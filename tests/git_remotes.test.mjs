@@ -2,8 +2,9 @@
  * Complete Git remote semantics for disposable clone workspaces (issue #103).
  *
  * Proves the `git-remote-preservation` invariant that repeatedly blocked PR #89:
- * multiple `remote.<name>.pushurl` entries, whitespace local paths, multi-remote
- * sets, fetch-only remotes, and stale clone-only remote removal.
+ * multiple `remote.<name>.url` entries (default multi-push destinations),
+ * multiple `remote.<name>.pushurl` entries, whitespace/metachar local paths,
+ * multi-remote sets, fetch-only remotes, and stale clone-only remote removal.
  *
  * // @covers git_remotes.read
  * // @level unit
@@ -87,6 +88,13 @@ function cloneWithIdentity(base, source, name = "clone") {
     return target;
 }
 
+function fetchUrlsAll(dir, remote = "origin") {
+    return runGit(dir, ["remote", "get-url", "--all", remote])
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+}
+
 function pushUrlsAll(dir, remote = "origin") {
     return runGit(dir, ["remote", "get-url", "--push", "--all", remote])
         .split("\n")
@@ -130,9 +138,9 @@ describe("git_remotes.read", () => {
 
             const origin = model.find((r) => r.name === "origin");
             const upstream = model.find((r) => r.name === "upstream");
-            assert.equal(origin.url, fetchRemote);
+            assert.deepEqual(origin.urls, [fetchRemote]);
             assert.deepEqual(origin.pushUrls, [pushRemote]);
-            assert.equal(upstream.url, otherRemote);
+            assert.deepEqual(upstream.urls, [otherRemote]);
             assert.deepEqual(
                 upstream.pushUrls,
                 [],
@@ -170,7 +178,7 @@ describe("git_remotes.read", () => {
             const model = readGitRemotes(repo);
             const origin = model.find((r) => r.name === "origin");
             assert.ok(origin, "origin must be present");
-            assert.equal(real(origin.url), real(fetchRemote));
+            assert.deepEqual(origin.urls.map(real), [real(fetchRemote)]);
             assert.ok(Array.isArray(origin.pushUrls), "pushUrls must be an array");
             assert.equal(
                 origin.pushUrls.length,
@@ -203,10 +211,63 @@ describe("git_remotes.read", () => {
 
             const origin = readGitRemotes(repo).find((r) => r.name === "origin");
             assert.ok(origin);
-            assert.equal(real(origin.url), real(originBare));
+            assert.deepEqual(origin.urls.map(real), [real(originBare)]);
             assert.deepEqual(origin.pushUrls, []);
             // Git default: get-url --push without explicit pushurl returns fetch URL.
             assert.equal(real(runGit(repo, ["remote", "get-url", "--push", "origin"])), real(originBare));
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    // @covers git_remotes.read
+    // @level unit
+    // @fails-without-fix git_remotes.read
+    it("preserves every configured remote.<name>.url (multi-url model)", () => {
+        // Git permits multiple remote.<name>.url values. With no pushurl,
+        // `git remote get-url --push --all` returns all of them and one push
+        // reaches every URL. Collapsing to the first drops effective destinations.
+        const base = mkdtempSync(join(tmpdir(), "pi-remotes-multi-url-"));
+        try {
+            const url1 = join(base, "mirror-a.git");
+            const url2 = join(base, "mirror-b.git");
+            initBare(url1);
+            initBare(url2);
+
+            const repo = initRepo(join(base, "repo"));
+            runGit(repo, ["remote", "add", "origin", url1]);
+            runGit(repo, ["remote", "set-url", "--add", "origin", url2]);
+
+            const configured = fetchUrlsAll(repo, "origin");
+            assert.equal(configured.length, 2, "fixture must configure two fetch URLs");
+            assert.deepEqual(configured.map(real), [real(url1), real(url2)]);
+
+            // No explicit pushurl → push destinations equal all fetch URLs.
+            assert.deepEqual(
+                pushUrlsAll(repo, "origin").map(real),
+                [real(url1), real(url2)],
+                "without pushurl, get-url --push --all must list every fetch URL",
+            );
+
+            const model = readGitRemotes(repo);
+            const origin = model.find((r) => r.name === "origin");
+            assert.ok(origin, "origin must be present");
+            assert.ok(Array.isArray(origin.urls), "urls must be an ordered array");
+            assert.equal(
+                origin.urls.length,
+                2,
+                "must keep BOTH remote.<name>.url values — keeping only the first drops push destinations",
+            );
+            assert.deepEqual(
+                origin.urls.map(real),
+                [real(url1), real(url2)],
+                "must preserve ordered multi-url entries exactly",
+            );
+            assert.deepEqual(
+                origin.pushUrls,
+                [],
+                "multi-url with no pushurl must not invent explicit pushUrls",
+            );
         } finally {
             rmSync(base, { recursive: true, force: true });
         }
@@ -251,7 +312,7 @@ describe("git_remotes.sync", () => {
                 "stale clone-only remotes must be removed",
             );
             const origin = cloneModel.find((r) => r.name === "origin");
-            assert.equal(real(origin.url), real(fetchRemote), "fetch URL must match source");
+            assert.deepEqual(origin.urls.map(real), [real(fetchRemote)], "fetch URL must match source");
             assert.equal(origin.pushUrls.length, 2, "both pushurls must be preserved on clone");
             assert.deepEqual(
                 origin.pushUrls.map(real).sort(),
@@ -335,7 +396,7 @@ describe("git_remotes.sync", () => {
 
             const origin = readGitRemotes(target).find((r) => r.name === "origin");
             assert.ok(origin, "origin must remain after sync");
-            assert.equal(real(origin.url), real(fetchRemote), "fetch URL must match source");
+            assert.deepEqual(origin.urls.map(real), [real(fetchRemote)], "fetch URL must match source");
             assert.equal(
                 origin.pushUrls.length,
                 2,
@@ -434,7 +495,7 @@ describe("git_remotes.sync", () => {
 
             const origin = readGitRemotes(target).find((r) => r.name === "origin");
             assert.ok(origin, "origin must remain after sync");
-            assert.equal(real(origin.url), real(fetchRemote), "fetch URL must match source");
+            assert.deepEqual(origin.urls.map(real), [real(fetchRemote)], "fetch URL must match source");
             assert.deepEqual(
                 origin.pushUrls.map(real),
                 [real(desired1), real(desired2)],
@@ -478,6 +539,239 @@ describe("git_remotes.sync", () => {
                 "",
                 "push must not land on the fetch-only remote when explicit pushurls exist",
             );
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    // @covers git_remotes.sync
+    // @level unit
+    // @fails-without-fix git_remotes.sync
+    it("syncs multiple remote.<name>.url values and proves push reaches every default destination", () => {
+        // Class member: multi-url / no-pushurl. Git pushes to every configured
+        // remote.<name>.url when no pushurl is set. Sync must preserve the full
+        // ordered url list so source and target push to the same destinations.
+        const base = mkdtempSync(join(tmpdir(), "pi-remotes-sync-multi-url-"));
+        try {
+            const url1 = join(base, "mirror-a.git");
+            const url2 = join(base, "mirror-b.git");
+            initBare(url1);
+            initBare(url2);
+
+            const source = initRepo(join(base, "source"));
+            runGit(source, ["remote", "add", "origin", url1]);
+            runGit(source, ["remote", "set-url", "--add", "origin", url2]);
+            // Seed both mirrors so objects exist on every default push destination.
+            runGit(source, ["push", "origin", "HEAD"]);
+
+            const target = cloneWithIdentity(base, source, "clone");
+            // Path clone leaves a single origin URL (source working tree).
+            assert.equal(
+                fetchUrlsAll(target, "origin").length,
+                1,
+                "path-style clone starts with a single origin URL",
+            );
+            // Leave a stale second URL + leftover pushurl so sync must rebuild.
+            const staleUrl = join(base, "stale-url.git");
+            const stalePush = join(base, "stale-push.git");
+            initBare(staleUrl);
+            initBare(stalePush);
+            runGit(target, ["remote", "set-url", "--add", "origin", staleUrl]);
+            runGit(target, ["remote", "set-url", "--push", "origin", stalePush]);
+
+            syncGitRemotes(source, target);
+
+            const origin = readGitRemotes(target).find((r) => r.name === "origin");
+            assert.ok(origin, "origin must remain after sync");
+            assert.deepEqual(
+                origin.urls.map(real),
+                [real(url1), real(url2)],
+                "both remote.<name>.url values must be preserved in order",
+            );
+            assert.deepEqual(
+                origin.pushUrls,
+                [],
+                "no-pushurl multi-url source must not invent pushUrls on the target",
+            );
+            assert.deepEqual(
+                fetchUrlsAll(target, "origin").map(real),
+                [real(url1), real(url2)],
+                "git remote get-url --all must list both fetch URLs",
+            );
+            assert.deepEqual(
+                pushUrlsAll(target, "origin").map(real),
+                [real(url1), real(url2)],
+                "without pushurl, get-url --push --all must equal all fetch URLs",
+            );
+
+            // Behavioral proof: one push from the synced target reaches EVERY
+            // configured url (default multi-destination push semantics).
+            runGit(target, ["checkout", "-b", "multi-url-proof"]);
+            writeFileSync(join(target, "proof.txt"), "multi-url-proof\n");
+            runGit(target, ["add", "proof.txt"]);
+            runGit(target, ["commit", "-m", "multi-url-proof"]);
+            runGit(target, ["push", "-u", "origin", "multi-url-proof"]);
+
+            assert.match(
+                branchList(url1, "multi-url-proof"),
+                /multi-url-proof/,
+                "push must land on first remote.<name>.url",
+            );
+            assert.match(
+                branchList(url2, "multi-url-proof"),
+                /multi-url-proof/,
+                "push must land on second remote.<name>.url — keeping only the first is the blocker",
+            );
+            assert.equal(
+                branchList(staleUrl, "multi-url-proof"),
+                "",
+                "push must not land on a stale multi-url that source does not have",
+            );
+            assert.equal(
+                branchList(stalePush, "multi-url-proof"),
+                "",
+                "push must not land on a leftover pushurl after clearing to multi-url default",
+            );
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    // @covers git_remotes.sync
+    // @level unit
+    // @fails-without-fix git_remotes.sync
+    it("syncs multi-url plus explicit pushurls and pushes only to the push destinations", () => {
+        // Class member: multi-url + explicit pushurl(s). Fetch URLs stay multi-valued
+        // for fetch topology; push must use only the configured pushurls.
+        const base = mkdtempSync(join(tmpdir(), "pi-remotes-multi-url-push-"));
+        try {
+            const url1 = join(base, "fetch-a.git");
+            const url2 = join(base, "fetch-b.git");
+            const push1 = join(base, "push-a.git");
+            const push2 = join(base, "push-b.git");
+            initBare(url1);
+            initBare(url2);
+            initBare(push1);
+            initBare(push2);
+
+            const source = initRepo(join(base, "source"));
+            runGit(source, ["remote", "add", "origin", url1]);
+            runGit(source, ["remote", "set-url", "--add", "origin", url2]);
+            runGit(source, ["remote", "set-url", "--push", "origin", push1]);
+            runGit(source, ["remote", "set-url", "--add", "--push", "origin", push2]);
+            runGit(source, ["push", "origin", "HEAD"]);
+
+            const target = cloneWithIdentity(base, source, "clone");
+            // Corrupt both sets so sync must rebuild url + pushurl independently.
+            const staleUrl = join(base, "stale-url.git");
+            const stalePush = join(base, "stale-push.git");
+            initBare(staleUrl);
+            initBare(stalePush);
+            runGit(target, ["remote", "set-url", "origin", staleUrl]);
+            runGit(target, ["remote", "set-url", "--push", "origin", stalePush]);
+
+            syncGitRemotes(source, target);
+
+            const origin = readGitRemotes(target).find((r) => r.name === "origin");
+            assert.deepEqual(
+                origin.urls.map(real),
+                [real(url1), real(url2)],
+                "multi fetch URLs must be preserved alongside explicit pushurls",
+            );
+            assert.deepEqual(
+                origin.pushUrls.map(real),
+                [real(push1), real(push2)],
+                "explicit multi pushurls must be preserved alongside multi fetch URLs",
+            );
+            assert.deepEqual(
+                fetchUrlsAll(target, "origin").map(real),
+                [real(url1), real(url2)],
+            );
+            assert.deepEqual(
+                pushUrlsAll(target, "origin").map(real),
+                [real(push1), real(push2)],
+                "with pushurls present, get-url --push --all must list only push destinations",
+            );
+
+            runGit(target, ["checkout", "-b", "multi-url-push-proof"]);
+            writeFileSync(join(target, "proof.txt"), "multi-url-push-proof\n");
+            runGit(target, ["add", "proof.txt"]);
+            runGit(target, ["commit", "-m", "multi-url-push-proof"]);
+            runGit(target, ["push", "-u", "origin", "multi-url-push-proof"]);
+
+            assert.match(branchList(push1, "multi-url-push-proof"), /multi-url-push-proof/);
+            assert.match(branchList(push2, "multi-url-push-proof"), /multi-url-push-proof/);
+            assert.equal(branchList(url1, "multi-url-push-proof"), "",
+                "push must not land on fetch URLs when explicit pushurls exist");
+            assert.equal(branchList(url2, "multi-url-push-proof"), "",
+                "push must not land on second fetch URL when explicit pushurls exist");
+            assert.equal(branchList(staleUrl, "multi-url-push-proof"), "");
+            assert.equal(branchList(stalePush, "multi-url-push-proof"), "");
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    // @covers git_remotes.sync
+    // @level unit
+    // @fails-without-fix git_remotes.sync
+    it("clears multi-stale remote.<name>.url values whose paths contain regex metacharacters", () => {
+        // Class member: multi-url clear must use complete-set drop (unset-all),
+        // never regex --delete of URL text — same hazard as multi-pushurl clear.
+        const base = mkdtempSync(join(tmpdir(), "pi-remotes-multi-url-meta-"));
+        try {
+            const desired1 = join(base, "desired[a].git");
+            const desired2 = join(base, "desired[b].git");
+            const stale1 = join(base, "stale[1].git");
+            const stale2 = join(base, "stale[2].git");
+            initBare(desired1);
+            initBare(desired2);
+            initBare(stale1);
+            initBare(stale2);
+
+            const source = initRepo(join(base, "source"));
+            runGit(source, ["remote", "add", "origin", desired1]);
+            runGit(source, ["remote", "set-url", "--add", "origin", desired2]);
+            runGit(source, ["push", "origin", "HEAD"]);
+
+            const target = cloneWithIdentity(base, source, "clone");
+            // Force a multi-valued stale url set containing unmatched `[`.
+            runGit(target, ["remote", "set-url", "origin", stale1]);
+            runGit(target, ["remote", "set-url", "--add", "origin", stale2]);
+            assert.equal(
+                fetchUrlsAll(target, "origin").length,
+                2,
+                "fixture must start with two stale metacharacter fetch URLs",
+            );
+
+            syncGitRemotes(source, target);
+
+            const origin = readGitRemotes(target).find((r) => r.name === "origin");
+            assert.deepEqual(
+                origin.urls.map(real),
+                [real(desired1), real(desired2)],
+                "desired ordered multi-url values must be rebuilt after metachar clear",
+            );
+            assert.deepEqual(origin.pushUrls, []);
+            assert.deepEqual(
+                fetchUrlsAll(target, "origin").map(real),
+                [real(desired1), real(desired2)],
+            );
+            assert.deepEqual(
+                pushUrlsAll(target, "origin").map(real),
+                [real(desired1), real(desired2)],
+            );
+
+            runGit(target, ["checkout", "-b", "multi-url-meta-proof"]);
+            writeFileSync(join(target, "proof.txt"), "multi-url-meta-proof\n");
+            runGit(target, ["add", "proof.txt"]);
+            runGit(target, ["commit", "-m", "multi-url-meta-proof"]);
+            runGit(target, ["push", "-u", "origin", "multi-url-meta-proof"]);
+
+            assert.match(branchList(desired1, "multi-url-meta-proof"), /multi-url-meta-proof/);
+            assert.match(branchList(desired2, "multi-url-meta-proof"), /multi-url-meta-proof/);
+            assert.equal(branchList(stale1, "multi-url-meta-proof"), "");
+            assert.equal(branchList(stale2, "multi-url-meta-proof"), "");
         } finally {
             rmSync(base, { recursive: true, force: true });
         }

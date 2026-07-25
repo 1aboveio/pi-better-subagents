@@ -1,21 +1,21 @@
 {
   "unit": "#103",
-  "headNote": "content HEAD of metachar clear fix; stamp commit may follow",
+  "headNote": "content HEAD of multi-url class-complete fix; stamp commit may follow",
   "results": [
     {
       "surface": "git_remotes.read",
       "kind": "library",
       "status": "pass",
-      "command": "node --experimental-strip-types -e '<inline metachar multi-stale\u2192multi-desired read+sync+push smoke>'",
-      "observed": "SMOKE PASS: metachar multi-stale clear via unset-all; push reached desired[a]/desired[b]; stale[1]/stale[2]/fetch empty; --delete would have failed"
+      "command": "node --experimental-strip-types -e '<inline multi-url/no-pushurl read+sync+push smoke>'",
+      "observed": "SMOKE PASS: multi-url/no-pushurl read+sync; push reached both urls; stale url+pushurl empty; model.urls.length=2"
     },
     {
       "surface": "git_remotes.sync",
       "kind": "library",
       "status": "pass",
-      "command": "node --experimental-strip-types -e '<inline metachar multi-stale\u2192multi-desired read+sync+push smoke>'",
-      "observed": "SMOKE PASS: metachar multi-stale clear via unset-all; push reached desired[a]/desired[b]; stale[1]/stale[2]/fetch empty; --delete would have failed"
+      "command": "node --experimental-strip-types -e '<inline multi-url/no-pushurl read+sync+push smoke>'",
+      "observed": "SMOKE PASS: multi-url/no-pushurl read+sync; push reached both urls; stale url+pushurl empty; model.urls.length=2"
     }
   ],
-  "headSha": "4900dccd4fe4d5796f7486eb7077c192686a5f5e"
+  "headSha": "PENDING"
 }
