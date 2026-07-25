@@ -1,0 +1,1 @@
+Rebase/closeout onto origin/main @ ce8e8a2 (#64 child-event-signatures). Clean replay of disposable clone workspace commit; no code conflicts. Refreshed Review Contract revision + checklist evidence SHAs; full suite 225 pass / 0 fail; screens green (scan-diff findings empty, checklist validate pass, lint-tests clean).
