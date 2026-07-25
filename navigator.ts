@@ -23,6 +23,7 @@ export {
     clampSelection,
     moveSelection,
     selectById,
+    applyNavigatorRows,
     buildNavigatorLines,
     createNavigatorOverlayComponent,
     createNavigatorOverlayFactory,
