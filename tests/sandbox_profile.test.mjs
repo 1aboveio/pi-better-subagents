@@ -1,5 +1,12 @@
 /**
  * Unit: sandbox.ts profile matches the confinement contract used by subagents.
+ *
+ * Import-strict on purpose (issue #39, AC5): the product sandbox module is
+ * imported statically at module load, so if it cannot be imported or loaded
+ * this file FAILS. The previous dynamic-import + catch reported a vacuous
+ * "skips when sandbox.ts cannot be imported" pass; an import failure must
+ * never produce a passing suite.
+ *
  * @covers sandbox-profile
  * @level unit
  */
@@ -8,25 +15,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, mkdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { sandboxSupported, buildSandboxCommand } from '../sandbox.ts';
 
-async function loadSandbox() {
-    return await import(new URL('../sandbox.ts', import.meta.url).href);
-}
-
-describe('sandbox profile (subagent write confinement)', async () => {
-    let sandboxSupported;
-    let buildSandboxCommand;
-    try {
-        const mod = await loadSandbox();
-        sandboxSupported = mod.sandboxSupported;
-        buildSandboxCommand = mod.buildSandboxCommand;
-    } catch (err) {
-        it('skips when sandbox.ts cannot be imported under this node', () => {
-            assert.ok(true, `import failed: ${err}`);
-        });
-        return;
-    }
-
+describe('sandbox profile (subagent write confinement)', () => {
     it('sandboxSupported is true only on darwin', () => {
         assert.equal(typeof sandboxSupported(), 'boolean');
         if (process.platform === 'darwin') assert.equal(sandboxSupported(), true);

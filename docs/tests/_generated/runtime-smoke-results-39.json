@@ -1,0 +1,23 @@
+[
+  {
+    "surface": "sandbox.backend-selection",
+    "kind": "library",
+    "status": "pass",
+    "command": "node --input-type=module -e \"import('./sandbox.ts').then(m => console.log(m.selectSandboxBackend()?.id, m.sandboxSupported()))\"",
+    "observed": "selected backend: sandbox-exec; sandboxSupported(): true on darwin host; pure registry lookup, no probe"
+  },
+  {
+    "surface": "sandbox.command-wrapper",
+    "kind": "library",
+    "status": "pass",
+    "command": "node --input-type=module -e \"... buildSandboxCommand({profilePath, writableDir, home, piBin: '/usr/bin/true', piArgs: ['-p','--mode','json']}) ...\"",
+    "observed": "wrapper argv [-f, <profile>, /usr/bin/true, -p, --mode, json]; SBPL profile written with deny file-write* + allow subpaths (SMOKE OK). Kernel confinement run under real sandbox-exec is blocked by this harness (sandbox_apply rc=71), an environment restriction."
+  },
+  {
+    "surface": "spawn.detached",
+    "kind": "library",
+    "status": "pass",
+    "command": "node --test tests/spawn_detached.test.mjs",
+    "observed": "2/2 pass: real detached child spawned, stdout+stderr streamed to the log file, exit code 0 resolved, argv order/elements intact"
+  }
+]

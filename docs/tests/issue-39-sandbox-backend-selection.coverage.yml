@@ -1,0 +1,27 @@
+# Coverage ownership for issue #39 — prefactor sandbox backend selection behind
+# one platform-neutral seam. Surfaces are extension-library internals; the depth
+# floor is unit. Tests exercise the real first-party modules (sandbox.ts,
+# spawn.ts); no mocks.
+id: issue-39-sandbox-backend-selection
+source: "https://github.com/1aboveio/pi-better-subagents/issues/39"
+ref: "issue:39"
+# criteria path omitted: contract is issue #5 spec/testing decisions + #39 ACs +
+# ADR docs/adr/0001-linux-sandbox-bubblewrap.md @ 070c145; no separate criteria.md.
+surfaces:
+  sandbox.backend-selection:
+    requiredLevels: [unit]
+    # Producer evidence attached (unit suite 87/87, RED→GREEN for the new seam);
+    # reviewer attestation promotes Unverified → Covered.
+    verified: false
+  sandbox.support-query:
+    requiredLevels: [unit]
+    verified: false
+  sandbox.command-wrapper:
+    requiredLevels: [unit]
+    verified: false
+  sandbox-profile:
+    requiredLevels: [unit]
+    verified: false
+  spawn.detached:
+    requiredLevels: [unit]
+    verified: false
