@@ -6,7 +6,13 @@
  * ExtensionAPI, and subagent_spawn_batch is invoked. Each child writes a
  * minimal JSON log and exits 0, so registry/parse/finalize paths are real.
  *
+ * Stubs for @earendil-works/* resolve entirely from a temp module root via a
+ * process-local ESM loader. This test never creates, unlinks, or mutates
+ * checkout node_modules (or any other package path under the repo).
+ *
  * // @covers subagent-spawn-batch.end-to-end
+ * // @level integration
+ * // @covers subagent-spawn-batch.capacity-admission
  * // @level integration
  */
 import {
@@ -15,13 +21,14 @@ import {
     writeFileSync,
     chmodSync,
     rmSync,
-    symlinkSync,
+    existsSync,
     lstatSync,
-    unlinkSync,
+    readdirSync,
 } from "node:fs";
+import { register } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { describe, it, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 
@@ -30,15 +37,12 @@ const REPO_ROOT = dirname(__dirname);
 const RUNTIME = mkdtempSync(join(tmpdir(), "batch-spawn-e2e-"));
 process.env.TMPDIR = RUNTIME;
 
-// Stub packages are created in a temp stubs dir and symlinked into the repo's
-// node_modules so ESM resolution finds them for index.ts. We never delete the
-// checkout's node_modules tree itself — only the symlinks we created.
+// All stub packages live under a temp root. Checkout node_modules is never touched.
 const STUBS_DIR = mkdtempSync(join(RUNTIME, "stubs-"));
-const NODE_MODULES = join(REPO_ROOT, "node_modules");
-const CREATED_STUB_LINKS = [];
+const CHECKOUT_NODE_MODULES = join(REPO_ROOT, "node_modules");
 
-function ensureStub(name, files) {
-    const pkgDir = join(STUBS_DIR, name);
+function writeStubPackage(name, files) {
+    const pkgDir = join(STUBS_DIR, ...name.split("/"));
     mkdirSync(pkgDir, { recursive: true });
     writeFileSync(
         join(pkgDir, "package.json"),
@@ -47,35 +51,80 @@ function ensureStub(name, files) {
     for (const [file, content] of Object.entries(files)) {
         writeFileSync(join(pkgDir, file), content);
     }
+    return pkgDir;
+}
 
-    const linkParent = join(NODE_MODULES, dirname(name));
-    mkdirSync(linkParent, { recursive: true });
-    const linkPath = join(NODE_MODULES, name);
+function setupStubs() {
+    writeStubPackage("@earendil-works/pi-ai", {
+        "index.js": `
+const scalar = (type, opts = {}) => ({ type, ...opts });
+export const Type = {
+    String: (opts) => scalar("string", opts),
+    Number: (opts) => scalar("number", opts),
+    Boolean: (opts) => scalar("boolean", opts),
+    Optional: (schema) => schema,
+    Array: (schema, opts = {}) => ({ type: "array", items: schema, ...opts }),
+    Object: (props, opts = {}) => ({ type: "object", properties: props, ...opts }),
+};
+`,
+    });
+    writeStubPackage("@earendil-works/pi-coding-agent", {
+        "index.js": "// Type-only stub\nexport {}\n",
+    });
 
-    // Never recursively delete an existing checkout package path. Only unlink a
-    // symlink we previously created for this test run; otherwise leave real
-    // packages alone and fail clearly if the path is already occupied.
-    let st;
-    try {
-        st = lstatSync(linkPath);
-    } catch {
-        st = null;
-    }
-    if (st) {
-        if (st.isSymbolicLink() && CREATED_STUB_LINKS.includes(linkPath)) {
-            unlinkSync(linkPath);
-        } else if (st.isSymbolicLink()) {
-            // Pre-existing symlink from a prior interrupted run of this test — safe to replace.
-            unlinkSync(linkPath);
-        } else {
-            throw new Error(
-                `Refusing to overwrite existing package path ${linkPath}; ` +
-                    "e2e setup must never recursively delete checkout packages.",
-            );
+    // Loader resolves the two packages from STUBS_DIR only — no checkout mutation.
+    const loaderPath = join(RUNTIME, "stub-loader.mjs");
+    writeFileSync(
+        loaderPath,
+        `import { pathToFileURL } from "node:url";
+const stubs = {
+  "@earendil-works/pi-ai": ${JSON.stringify(join(STUBS_DIR, "@earendil-works/pi-ai/index.js"))},
+  "@earendil-works/pi-coding-agent": ${JSON.stringify(join(STUBS_DIR, "@earendil-works/pi-coding-agent/index.js"))},
+};
+export async function resolve(specifier, context, nextResolve) {
+  if (Object.prototype.hasOwnProperty.call(stubs, specifier)) {
+    return { shortCircuit: true, url: pathToFileURL(stubs[specifier]).href };
+  }
+  return nextResolve(specifier, context);
+}
+`,
+    );
+    register(pathToFileURL(loaderPath).href);
+}
+
+function assertCheckoutNodeModulesUntouched() {
+    // Invariant: this suite must not create package trees or symlinks under the
+    // checkout node_modules. An empty dir left by an older run is fine; any
+    // package path is not.
+    if (!existsSync(CHECKOUT_NODE_MODULES)) return;
+    const entries = [];
+    const walk = (dir, rel = "") => {
+        for (const name of readdirSync(dir)) {
+            const full = join(dir, name);
+            const childRel = rel ? `${rel}/${name}` : name;
+            let st;
+            try {
+                st = lstatSync(full);
+            } catch {
+                continue;
+            }
+            if (st.isSymbolicLink()) {
+                entries.push(`symlink:${childRel}`);
+            } else if (st.isDirectory()) {
+                // Empty package-scope dirs from prior interrupted runs are ok only
+                // when they contain nothing. Nested files/symlinks fail the invariant.
+                walk(full, childRel);
+            } else {
+                entries.push(`file:${childRel}`);
+            }
         }
-    }
-    symlinkSync(pkgDir, linkPath, "dir");
-    CREATED_STUB_LINKS.push(linkPath);
+    };
+    walk(CHECKOUT_NODE_MODULES);
+    assert.deepEqual(
+        entries,
+        [],
+        `checkout node_modules must stay free of stubs/packages; found: ${entries.join(", ") || "(none)"}`,
+    );
 }
 
 function clearRuns() {
@@ -101,26 +150,6 @@ function writeRunningMeta({ writeMeta, nextRunId }, name) {
     return id;
 }
 
-function setupStubs() {
-    mkdirSync(NODE_MODULES, { recursive: true });
-    ensureStub("@earendil-works/pi-ai", {
-        "index.js": `
-const scalar = (type, opts = {}) => ({ type, ...opts });
-export const Type = {
-    String: (opts) => scalar("string", opts),
-    Number: (opts) => scalar("number", opts),
-    Boolean: (opts) => scalar("boolean", opts),
-    Optional: (schema) => schema,
-    Array: (schema, opts = {}) => ({ type: "array", items: schema, ...opts }),
-    Object: (props, opts = {}) => ({ type: "object", properties: props, ...opts }),
-};
-`,
-    });
-    ensureStub("@earendil-works/pi-coding-agent", {
-        "index.js": "// Type-only stub\nexport {}\n",
-    });
-}
-
 function fakePiScript() {
     return `#!/bin/bash
 if [ -n "$PI_SLEEP_SECONDS" ]; then
@@ -138,7 +167,7 @@ done
 base=$(dirname "$sess")
 log="$base/runs/$id/output.log"
 mkdir -p "$(dirname "$log")"
-printf '%s\n' '{"type":"agent_settled"}' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}]}]}' > "$log"
+printf '%s\\n' '{"type":"agent_settled"}' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}]}]}' > "$log"
 `;
 }
 
@@ -175,6 +204,10 @@ function loadExtension(mod) {
     return { tools, messages };
 }
 
+function countOwnedRunning(listMetas, effectiveStatus, ownedByThisParent) {
+    return listMetas().filter((m) => ownedByThisParent(m) && effectiveStatus(m) === "running").length;
+}
+
 async function waitForFinished(readMeta, id, { maxAttempts = 80, delayMs = 25 } = {}) {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
         const meta = readMeta(id);
@@ -188,29 +221,38 @@ describe("subagent_spawn_batch end-to-end", () => {
     let origPath;
     let mod;
     let registry;
+    let capacity;
 
     before(async () => {
         origPath = process.env.PATH;
         setupStubs();
+        assertCheckoutNodeModulesUntouched();
         const binDir = makeMockPi();
         process.env.PATH = `${binDir}:${origPath}`;
         mod = await import("../index.ts");
         registry = await import("../registry.ts");
+        capacity = await import("../capacity.mjs");
+        assertCheckoutNodeModulesUntouched();
     });
 
     beforeEach(() => {
         clearRuns();
+        capacity._resetSharedCapacityGateForTests();
     });
 
     after(() => {
         process.env.PATH = origPath;
-        // Remove only the stub symlinks this test created — never a real package tree.
-        for (const link of CREATED_STUB_LINKS) {
-            try {
-                if (lstatSync(link).isSymbolicLink()) unlinkSync(link);
-            } catch {}
-        }
+        // Cleanup owns only the temp RUNTIME tree created by this suite.
         rmSync(RUNTIME, { recursive: true, force: true });
+        assertCheckoutNodeModulesUntouched();
+    });
+
+    it("does not mutate checkout node_modules for stubs", () => {
+        assertCheckoutNodeModulesUntouched();
+        // Source pin: setup must not reference checkout package path mutation APIs.
+        // Behavioral proof is the filesystem assertion above.
+        assert.equal(existsSync(join(CHECKOUT_NODE_MODULES, "@earendil-works/pi-ai")), false);
+        assert.equal(existsSync(join(CHECKOUT_NODE_MODULES, "@earendil-works/pi-coding-agent")), false);
     });
 
     it("launches multiple jobs and records batchId/batchName in each meta", async () => {
@@ -268,6 +310,90 @@ describe("subagent_spawn_batch end-to-end", () => {
                 ),
             /Batch of 1 jobs exceeds available capacity \(0\/4 subagent slots free\)/,
         );
+    });
+
+    it("reject-mode batch + concurrent single-spawn never exceeds maxConcurrent", async () => {
+        // Class counterexample: maxConcurrent free slots = 2. A two-job reject
+        // batch and a concurrent single spawn race. Without shared reservation,
+        // batch launches job 1, yields, single takes a slot, batch launches job 2
+        // → 3 new runs (plus the 2 pre-filled = 5 > 4). With reservation, either
+        // the batch takes both free slots or the single takes one and the batch
+        // is rejected wholesale — never oversubscribe.
+        const { tools } = loadExtension(mod);
+        const ctx = makeCtx();
+
+        for (let i = 0; i < 2; i++) {
+            writeRunningMeta(registry, `prefill-${i}`);
+        }
+        const before = countOwnedRunning(
+            registry.listMetas,
+            registry.effectiveStatus,
+            registry.ownedByThisParent,
+        );
+        assert.equal(before, 2);
+
+        const batchP = tools.subagent_spawn_batch.execute(
+            "tc-race-batch",
+            {
+                shared: { tools: "read,bash", sandbox: false },
+                jobs: [
+                    { prompt: "race-a", name: "race-a" },
+                    { prompt: "race-b", name: "race-b" },
+                ],
+            },
+            null,
+            null,
+            ctx,
+        );
+        const singleP = tools.subagent_spawn.execute(
+            "tc-race-single",
+            { prompt: "race-single", name: "race-single", tools: "read,bash", sandbox: false },
+            null,
+            null,
+            ctx,
+        ).then(
+            (res) => ({ ok: true, res }),
+            (err) => ({ ok: false, err }),
+        );
+
+        const [batchOutcome, singleOutcome] = await Promise.all([
+            batchP.then(
+                (res) => ({ ok: true, res }),
+                (err) => ({ ok: false, err }),
+            ),
+            singleP,
+        ]);
+
+        const after = countOwnedRunning(
+            registry.listMetas,
+            registry.effectiveStatus,
+            registry.ownedByThisParent,
+        );
+        assert.ok(
+            after <= 4,
+            `owned running must not exceed maxConcurrent=4; got ${after} ` +
+                `(batch ok=${batchOutcome.ok}, single ok=${singleOutcome.ok})`,
+        );
+
+        // Exactly one of: batch fully launched (2) and single rejected, or
+        // single launched (1) and batch fully rejected. Never a partial batch
+        // plus a single that together oversubscribe.
+        if (batchOutcome.ok) {
+            const text = batchOutcome.res.content[0].text;
+            assert.match(text, /launched 2 subagent\(s\):/i);
+            assert.equal(singleOutcome.ok, false, "single must be refused when batch reserved both free slots");
+            assert.match(String(singleOutcome.err?.message ?? singleOutcome.err), /Max concurrent subagents/);
+            assert.equal(after, 4); // 2 prefill + 2 batch
+        } else {
+            assert.equal(singleOutcome.ok, true, "if batch is rejected, single should have taken a free slot");
+            assert.match(
+                String(batchOutcome.err?.message ?? batchOutcome.err),
+                /Batch of 2 jobs exceeds available capacity/,
+            );
+            assert.ok(after <= 4);
+            // Single alone: 2 prefill + 1 single = 3
+            assert.equal(after, 3);
+        }
     });
 
     it("launch-available partial launch reports skipped jobs", async () => {
@@ -371,6 +497,21 @@ describe("subagent_spawn_batch end-to-end", () => {
             const launchedId = text.match(/• ok → (sa_[a-z0-9_]+)/)?.[1];
             assert.ok(launchedId);
             assert.equal(registry.readMeta(launchedId).status, "running");
+            // Released unused reservations so later spawns are not blocked.
+            const after = countOwnedRunning(
+                registry.listMetas,
+                registry.effectiveStatus,
+                registry.ownedByThisParent,
+            );
+            assert.equal(after, 1);
+            const follow = await tools.subagent_spawn.execute(
+                "tc3c-follow",
+                { prompt: "after-reject-failure", tools: "read,bash", sandbox: false },
+                null,
+                null,
+                ctx,
+            );
+            assert.match(follow.content[0].text, /Subagent launched/);
         } finally {
             if (origAgentDir === undefined) {
                 delete process.env.PI_CODING_AGENT_DIR;

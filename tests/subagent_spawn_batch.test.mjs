@@ -330,6 +330,30 @@ describe("planBatchLaunches", () => {
             /Batch of 2 jobs exceeds available capacity \(1\/4 subagent slots free\)/,
         );
     });
+
+    it("subtracts pending reservations from available capacity", () => {
+        assert.throws(
+            () =>
+                planBatchLaunches({
+                    jobs: [{ name: "a" }, { name: "b" }],
+                    runningCount: 0,
+                    pendingCount: 1,
+                    maxConcurrent: 2,
+                    onCapacity: "reject",
+                }),
+            /Batch of 2 jobs exceeds available capacity \(1\/2 subagent slots free\)/,
+        );
+
+        const partial = planBatchLaunches({
+            jobs: [{ name: "a" }, { name: "b" }, { name: "c" }],
+            runningCount: 0,
+            pendingCount: 1,
+            maxConcurrent: 3,
+            onCapacity: "launch-available",
+        });
+        assert.deepEqual(partial.toLaunch, [{ name: "a" }, { name: "b" }]);
+        assert.deepEqual(partial.skipped, [{ name: "c" }]);
+    });
 });
 
 describe("formatBatchLaunchResponse", () => {
@@ -453,31 +477,53 @@ describe("index.ts batch wiring", () => {
 
     // @covers subagent-spawn-batch.capacity-admission
     // @level unit
-    it("reject mode does not re-check capacity mid-loop after admission", () => {
-        // Once reject-mode admits the batch, a mid-loop capacity branch would
-        // partially launch — the execute body must not abandon remaining jobs
-        // for capacity after the pre-loop whole-batch check.
+    it("reject mode reserves whole-batch capacity on the shared gate", () => {
+        // Class invariant: reject mode holds all slots before any job launches so
+        // an interleaved single-spawn cannot oversubscribe after job 1 yields.
         const executeMatch = indexSource.match(
             /name:\s*"subagent_spawn_batch"[\s\S]*?async execute[\s\S]*?(?=\/\/ ---- subagent_list)/,
         );
         assert.ok(executeMatch, "must locate subagent_spawn_batch.execute");
         const body = executeMatch[0];
         assert.ok(
-            body.includes('p.onCapacity === "launch-available"') ||
-                body.includes("launchAvailable"),
-            "capacity mid-loop skip must be gated on launch-available",
+            body.includes("getSharedCapacityGate"),
+            "batch path must use the shared capacity gate",
         );
-        // The only capacity-exhaustion skip of remaining jobs must be under
-        // launch-available; reject mode accounts for later jobs as failed, not skipped.
         assert.match(
             body,
-            /if\s*\(\s*launchAvailable\s*&&\s*countRunning\(\)\s*>=\s*maxConcurrent\s*\)/,
-            "mid-loop capacity skip must require launchAvailable",
+            /tryReserve\(\s*p\.jobs\.length\s*,\s*maxConcurrent\s*\)/,
+            "reject mode must reserve the whole batch atomically",
+        );
+        assert.match(
+            body,
+            /launchAvailable[\s\S]*tryReserve\(\s*1\s*,\s*maxConcurrent\s*\)/,
+            "launch-available must reserve one slot per job",
         );
         assert.match(
             body,
             /not launched due to earlier job failure in reject mode/,
             "reject-mode launch failure must account for later jobs explicitly",
         );
+    });
+
+    // @covers subagent-spawn-batch.capacity-admission
+    // @level unit
+    it("single-spawn path reserves on the same shared capacity gate", () => {
+        const spawnMatch = indexSource.match(
+            /name:\s*"subagent_spawn"[\s\S]*?async execute[\s\S]*?(?=\/\/ ---- subagent_spawn_batch)/,
+        );
+        assert.ok(spawnMatch, "must locate subagent_spawn.execute");
+        const body = spawnMatch[0];
+        assert.ok(
+            body.includes("getSharedCapacityGate"),
+            "single-spawn must share the capacity gate with batch",
+        );
+        assert.match(
+            body,
+            /tryReserve\(\s*1\s*,\s*maxConcurrent\s*\)/,
+            "single-spawn must reserve one slot before launch",
+        );
+        assert.match(body, /gate\.commit\(\s*1\s*\)/, "single-spawn must commit after launch");
+        assert.match(body, /gate\.release\(\s*1\s*\)/, "single-spawn must release on failure");
     });
 });

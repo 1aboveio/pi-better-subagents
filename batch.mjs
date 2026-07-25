@@ -135,11 +135,21 @@ export function nextBatchId() {
 /**
  * Decide which jobs launch and which are skipped based on available capacity.
  *
+ * Capacity = maxConcurrent - runningCount - pendingCount. pendingCount covers
+ * in-process reservations held by concurrent single/batch spawns so a stale
+ * snapshot cannot oversubscribe after an async yield.
+ *
  *   onCapacity === "reject" (default): throw if the whole batch does not fit.
  *   onCapacity === "launch-available": launch up to the available slots.
  */
-export function planBatchLaunches({ jobs, runningCount, maxConcurrent, onCapacity }) {
-    const available = Math.max(0, maxConcurrent - runningCount);
+export function planBatchLaunches({
+    jobs,
+    runningCount,
+    pendingCount = 0,
+    maxConcurrent,
+    onCapacity,
+}) {
+    const available = Math.max(0, maxConcurrent - runningCount - pendingCount);
 
     if (onCapacity === "launch-available") {
         const toLaunch = jobs.slice(0, available);

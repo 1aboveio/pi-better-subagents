@@ -44,6 +44,10 @@ import {
     planBatchLaunches,
     validateBatchPlan,
 } from "./batch.mjs";
+import {
+    formatCapacityRejectMessage,
+    getSharedCapacityGate,
+} from "./capacity.mjs";
 import { formatCallbackTrigger, formatCallbackQuiet, buildCompletionDelivery } from "./completion.ts";
 import {
     SPINNER,
@@ -399,21 +403,31 @@ export default function (pi: ExtensionAPI) {
 
             const cfg = loadConfig();
             const maxConcurrent = cfg.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
-            const running = listMetas().filter((m) => ownedByThisParent(m) && effectiveStatus(m) === "running").length;
-            if (running >= maxConcurrent) {
+            const countRunning = () =>
+                listMetas().filter((m) => ownedByThisParent(m) && effectiveStatus(m) === "running").length;
+            // Shared with batch-spawn: reserve before any async work so an interleaved
+            // batch cannot oversubscribe after this check and before writeMeta.
+            const gate = getSharedCapacityGate(countRunning);
+            if (!gate.tryReserve(1, maxConcurrent)) {
                 throw new Error(`Max concurrent subagents (${maxConcurrent}) reached. Stop or let some finish first.`);
             }
 
-            const { id, spawned, runtime, warn, sandboxDir } = await spawnSubagentRun(ctx, p);
-            return text(
-                `Subagent launched: ${p.name ? `${p.name} ` : ""}id=${id} (pid ${spawned.pid}).\n` +
-                (p.callback === false
-                    ? `Running in the background; the foreground is free. It will finish quietly — read the result with subagent_result id=${id}.\n`
-                    : `Running in the background; the foreground is free. Its result will be posted back here when it finishes.\n`) +
-                (sandboxDir ? `Sandboxed: writes confined to ${sandboxDir}\n` : "") +
-                runtime + warn +
-                `Log: ${logPathFor(id)}`,
-            );
+            try {
+                const { id, spawned, runtime, warn, sandboxDir } = await spawnSubagentRun(ctx, p);
+                gate.commit(1);
+                return text(
+                    `Subagent launched: ${p.name ? `${p.name} ` : ""}id=${id} (pid ${spawned.pid}).\n` +
+                    (p.callback === false
+                        ? `Running in the background; the foreground is free. It will finish quietly — read the result with subagent_result id=${id}.\n`
+                        : `Running in the background; the foreground is free. Its result will be posted back here when it finishes.\n`) +
+                    (sandboxDir ? `Sandboxed: writes confined to ${sandboxDir}\n` : "") +
+                    runtime + warn +
+                    `Log: ${logPathFor(id)}`,
+                );
+            } catch (err) {
+                gate.release(1);
+                throw err;
+            }
         },
     });
 
@@ -479,20 +493,33 @@ export default function (pi: ExtensionAPI) {
             const countRunning = () =>
                 listMetas().filter((m) => ownedByThisParent(m) && effectiveStatus(m) === "running").length;
             const launchAvailable = p.onCapacity === "launch-available";
+            // Shared with single-spawn. Reservations count against maxConcurrent so a
+            // concurrent single spawn cannot take a slot the batch already admitted.
+            const gate = getSharedCapacityGate(countRunning);
 
             validateBatchPlan({ shared: p.shared, jobs: p.jobs, onCapacity: p.onCapacity, config: cfg });
 
-            // reject mode: whole-batch admission only. Capacity must cover every job
-            // before anything launches. Check immediately before the launch loop so an
-            // interleaving spawn cannot create a partial batch. Once admitted, do not
-            // abandon mid-loop on capacity — that would partially launch in reject mode.
+            // reject mode: whole-batch reservation is all-or-nothing. Holding the slots
+            // until each job commits (or the unused remainder is released) closes the
+            // interleaving oversubscribe class — a stale plan alone is not enough.
             if (!launchAvailable) {
+                // planBatchLaunches still produces the public error text (incl. pending).
                 planBatchLaunches({
                     jobs: p.jobs,
                     runningCount: countRunning(),
+                    pendingCount: gate.pending,
                     maxConcurrent,
                     onCapacity: p.onCapacity,
                 });
+                if (!gate.tryReserve(p.jobs.length, maxConcurrent)) {
+                    // Race: capacity changed between plan and reserve.
+                    throw new Error(formatCapacityRejectMessage({
+                        jobCount: p.jobs.length,
+                        runningCount: countRunning(),
+                        pendingCount: gate.pending,
+                        maxConcurrent,
+                    }));
+                }
             }
 
             const names = assignBatchJobNames(p.jobs);
@@ -500,30 +527,42 @@ export default function (pi: ExtensionAPI) {
             const launched: { name: string; id: string }[] = [];
             const failed: { name: string; reason: string }[] = [];
             const skipped: { name: string }[] = [];
+            // How many reject-mode reserved slots are still held (not yet committed/released).
+            let reservedRemaining = launchAvailable ? 0 : p.jobs.length;
 
-            // Walk every job in order. launch-available admits one slot at a time and
-            // backfills when a job fails before a normal run is launched (no slot used).
+            // Walk every job in order. launch-available reserves one slot at a time and
+            // backfills when a job fails before a normal run is launched (slot released).
             for (let i = 0; i < p.jobs.length; i++) {
                 const job = p.jobs[i];
                 const name = names[i];
                 const merged = mergeJobOptions(p.shared, job);
 
-                if (launchAvailable && countRunning() >= maxConcurrent) {
-                    for (let j = i; j < p.jobs.length; j++) {
-                        skipped.push({ name: names[j] });
+                if (launchAvailable) {
+                    if (!gate.tryReserve(1, maxConcurrent)) {
+                        for (let j = i; j < p.jobs.length; j++) {
+                            skipped.push({ name: names[j] });
+                        }
+                        break;
                     }
-                    break;
                 }
 
                 try {
                     const { id } = await spawnSubagentRun(ctx, { ...merged, name }, { batchId, batchName: p.batchName });
+                    gate.commit(1);
+                    if (!launchAvailable) reservedRemaining -= 1;
                     launched.push({ name, id });
                 } catch (err) {
+                    gate.release(1);
+                    if (!launchAvailable) reservedRemaining -= 1;
                     const reason = err instanceof Error ? err.message : String(err);
                     failed.push({ name, reason });
                     if (!launchAvailable) {
-                        // reject mode: leave already-launched runs running, but every
-                        // later job must still appear in the response (not disappear).
+                        // reject mode: leave already-launched runs running, release any
+                        // still-held later reservations, and report every later job as failed.
+                        if (reservedRemaining > 0) {
+                            gate.release(reservedRemaining);
+                            reservedRemaining = 0;
+                        }
                         for (let j = i + 1; j < p.jobs.length; j++) {
                             failed.push({
                                 name: names[j],
@@ -537,6 +576,12 @@ export default function (pi: ExtensionAPI) {
                     // launch-available: failure did not consume a slot — continue so
                     // later jobs can use remaining capacity (backfill).
                 }
+            }
+
+            // Safety: any unused reject-mode reservation must not leak.
+            if (reservedRemaining > 0) {
+                gate.release(reservedRemaining);
+                reservedRemaining = 0;
             }
 
             return text(formatBatchLaunchResponse({ batchId, batchName: p.batchName, launched, skipped, failed }));
