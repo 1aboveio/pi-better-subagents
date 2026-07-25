@@ -1,0 +1,1 @@
+Rebased #86 onto main after #75/#94 landed; class-complete round-3 bound for newline-free lifecycle scan memory; Review Contract in commit body.
