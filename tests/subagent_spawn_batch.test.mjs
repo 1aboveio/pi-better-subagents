@@ -481,7 +481,7 @@ describe("index.ts batch wiring", () => {
         // Class invariant: reject mode holds all slots before any job launches so
         // an interleaved single-spawn cannot oversubscribe after job 1 yields.
         const executeMatch = indexSource.match(
-            /name:\s*"subagent_spawn_batch"[\s\S]*?async execute[\s\S]*?(?=\/\/ ---- subagent_list)/,
+            /name:\s*"subagent_spawn_batch"[\s\S]*?async execute[\s\S]*?(?=\/\/ ---- (?:subagent_list|model-facing))/
         );
         assert.ok(executeMatch, "must locate subagent_spawn_batch.execute");
         const body = executeMatch[0];

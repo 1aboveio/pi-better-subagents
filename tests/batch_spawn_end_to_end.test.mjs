@@ -69,10 +69,17 @@ export const Type = {
 `,
     });
     writeStubPackage("@earendil-works/pi-coding-agent", {
-        "index.js": "// Type-only stub\nexport {}\n",
+        "index.js": "// Type-only stub\nexport class CustomEditor {}\n",
+    });
+    writeStubPackage("@earendil-works/pi-tui", {
+        "index.js": `
+export const Key = { left: "left" };
+export function matchesKey() { return false; }
+export function truncateToWidth(s) { return s; }
+`,
     });
 
-    // Loader resolves the two packages from STUBS_DIR only — no checkout mutation.
+    // Loader resolves packages from STUBS_DIR only — no checkout mutation.
     const loaderPath = join(RUNTIME, "stub-loader.mjs");
     writeFileSync(
         loaderPath,
@@ -80,6 +87,7 @@ export const Type = {
 const stubs = {
   "@earendil-works/pi-ai": ${JSON.stringify(join(STUBS_DIR, "@earendil-works/pi-ai/index.js"))},
   "@earendil-works/pi-coding-agent": ${JSON.stringify(join(STUBS_DIR, "@earendil-works/pi-coding-agent/index.js"))},
+  "@earendil-works/pi-tui": ${JSON.stringify(join(STUBS_DIR, "@earendil-works/pi-tui/index.js"))},
 };
 export async function resolve(specifier, context, nextResolve) {
   if (Object.prototype.hasOwnProperty.call(stubs, specifier)) {

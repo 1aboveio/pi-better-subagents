@@ -838,12 +838,17 @@ export default function (pi: ExtensionAPI) {
     // "no background resources at load" rule.
     pi.on("session_start", async (_event, ctx) => {
         uiCtx = ctx;
-        // Navigator: footer hint + empty-editor ← wrapper (TUI only; both
-        // no-op in print/RPC). Install is reload-safe and composes with any
-        // editor component another extension configured.
+        // Reload / session switch hardening (#48):
+        // - Drop any leftover overlay timers/confirm state from a prior session
+        //   (defensive if the host skipped session_shutdown before re-start).
+        // - Reinstall the editor wrapper without stacking (marked factory).
+        // - Clear + republish footer statuses (pi clears extension statuses on
+        //   session switch/reload; dirty-check only dedupes within a session).
+        disposeTrackedNavigator(navigatorDisposeSlot);
+        if (isNavigatorUiAvailable(ctx)) {
+            try { ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, undefined); } catch { /* ignore */ }
+        }
         installNavigator(ctx);
-        // pi clears extension statuses on session switch/reload, so republish
-        // unconditionally here (the dirty-check only dedupes within a session).
         lastNavigatorHint = undefined;
         updateNavigatorFooter(ctx);
         if (listMetas().some((m) => ownedByThisParent(m) && effectiveStatus(m) === "running")) ensureTicker();
