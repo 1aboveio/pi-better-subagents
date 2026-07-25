@@ -32,10 +32,9 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch'
       || startsWith(github.head_ref, 'mergify/merge-queue/')
-    # This queue suite (web_fetch + gh) is Linux-compatible and does not need
-    # sandbox-exec. The broader sandbox-dependent suite remains blocked by
-    # https://github.com/1aboveio/pi-better-subagents/issues/5.
-    runs-on: [self-hosted, Linux, X64, docker]
+    # Bubblewrap is the Linux sandbox backend. Run this queue lane on the
+    # supported Ubuntu image so real confinement is a required integration gate.
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
@@ -47,6 +46,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Install bubblewrap
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          command -v bwrap
+          bwrap --version
 
       - name: Ensure GitHub CLI is installed
         run: |
@@ -138,4 +145,6 @@ jobs:
           gh issue list -R "${{ github.repository }}" --state open --json number --jq length
 
       - name: Run queue integration tests
-        run: bash tests/run_queue.sh
+        run: |
+          node --test tests/linux_bubblewrap.integration.mjs
+          bash tests/run_queue.sh
