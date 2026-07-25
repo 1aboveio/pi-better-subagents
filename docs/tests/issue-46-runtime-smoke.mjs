@@ -374,7 +374,54 @@ await record(
         check(resolved === null, "custom() settled with done(null)");
         check(timers.activeCount() === 0, "no orphan after late close");
 
-        return "index.ts parses; openTrackedNavigator + disposeTrackedNavigator wired; session_shutdown path clears active detail timer under Pi custom()→done(null) semantics; no setFooter";
+        // Rejection path (fix round 2): Pi rejects custom() on setup failure.
+        // openTrackedNavigator must clear the dispose slot AND not emit
+        // unhandledRejection when the returned promise is discarded (index does).
+        const unhandled = [];
+        const onUnhandled = (reason) => { unhandled.push(reason); };
+        process.on("unhandledRejection", onUnhandled);
+        try {
+            let rejectDispose;
+            const rejectSlot = {
+                get: () => rejectDispose,
+                set: (fn) => { rejectDispose = fn; },
+            };
+            let rejectComponent;
+            const rejectUi = {
+                custom(factory, options) {
+                    check(options && options.overlay === true, "overlay:true on reject path");
+                    factory(
+                        { requestRender() {} },
+                        { fg: (_c, s) => s },
+                        {},
+                        () => {},
+                    );
+                    return Promise.reject(new Error("custom rejected"));
+                },
+            };
+            // Discard return — production openNavigator does the same.
+            openTrackedNavigator(
+                rejectUi,
+                [{ id: "sa_rej", name: "r", status: "running", model: "m", elapsed: "1s", spend: "" }],
+                {
+                    matchKey: (d, id) => d === `<${id}>`,
+                    truncate: (s, w) => (s.length > w ? s.slice(0, w) : s),
+                    onComponent: (c) => { rejectComponent = c; },
+                },
+                rejectSlot,
+            );
+            check(typeof rejectComponent?.dispose === "function", "onComponent before reject");
+            check(typeof rejectDispose === "function", "dispose slot set before reject settles");
+            await Promise.resolve();
+            await Promise.resolve();
+            await Promise.resolve();
+            check(rejectDispose === undefined, "dispose slot cleared on custom() rejection");
+            check(unhandled.length === 0, `no unhandledRejection on discard (got ${unhandled.length})`);
+        } finally {
+            process.off("unhandledRejection", onUnhandled);
+        }
+
+        return "index.ts parses; openTrackedNavigator + disposeTrackedNavigator wired; session_shutdown path clears active detail timer under Pi custom()→done(null); custom() rejection clears dispose slot with no unhandledRejection; no setFooter";
     },
 );
 

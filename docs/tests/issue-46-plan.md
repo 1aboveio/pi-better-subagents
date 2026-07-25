@@ -34,6 +34,9 @@ Out of scope: #47 two-press close/dismiss, #48 docs/hardening (except #46 eviden
   session_shutdown. Pi's `ui.custom()` resolves to `done(null)`, not the
   component — never capture dispose from the custom() promise (fix round 1:
   `navigator.detail.timer-lifecycle`).
+- Settlement cleanup of the dispose slot uses `Promise.resolve(opened).then(clear, clear)`
+  (not `.finally`) so a rejected `custom()` does not create an unhandledRejection
+  when callers discard the returned promise (fix round 2).
 - Widget paths untouched. Non-TUI isolation unchanged (`isNavigatorUiAvailable`).
 
 ## Fix rounds
@@ -41,3 +44,4 @@ Out of scope: #47 two-press close/dismiss, #48 docs/hardening (except #46 eviden
 | Round | Theme | Closed by |
 |-------|-------|-----------|
 | 1 | `navigator.detail.timer-lifecycle` — `showNavigator().then(component => …)` never saw dispose under Pi custom() semantics | `openTrackedNavigator`/`disposeTrackedNavigator` + Pi-compatible custom() fakes + regression tests proving session_shutdown clears active detail timer |
+| 2 | `navigator.detail.timer-lifecycle` — `Promise.resolve(opened).finally(...)` rethrows rejection into a second promise; `void` does not consume it → unhandledRejection on Pi custom() setup failure | `.then(clear, clear)` handled settlement cleanup; rejection-path unit + runtime-smoke prove slot cleared and zero unhandledRejection when return is discarded |

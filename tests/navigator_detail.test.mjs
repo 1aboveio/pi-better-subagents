@@ -664,4 +664,73 @@ describe("navigator detail view", () => {
         assert.equal(resolved, null, "must not treat custom() resolution as the component");
         assert.notEqual(resolved, captured);
     });
+
+    // @covers navigator.detail
+    // @level unit
+    it("custom() rejection clears dispose slot without unhandledRejection", async () => {
+        // Fix round 2 (navigator.detail.timer-lifecycle): Pi rejects custom()
+        // when overlay factory/show setup fails. openTrackedNavigator must still
+        // clear the token-guarded dispose slot, and must not emit unhandledRejection
+        // when callers discard the returned promise (index openNavigator does).
+        // `.finally` rethrows into a second promise that `void` does not consume;
+        // settlement cleanup must use a handled `.then(clear, clear)` pattern.
+        const unhandled = [];
+        const onUnhandled = (reason) => {
+            unhandled.push(reason);
+        };
+        process.on("unhandledRejection", onUnhandled);
+        try {
+            let activeDispose = "sentinel-prior";
+            const disposeSlot = {
+                get: () => activeDispose,
+                set: (fn) => { activeDispose = fn; },
+            };
+            let captured;
+            const rejectErr = new Error("custom rejected");
+            const ui = {
+                custom(factory, options) {
+                    assert.equal(options?.overlay, true);
+                    // Factory runs (onComponent captures dispose), then custom()
+                    // rejects — Pi setup-failure shape after the overlay exists.
+                    factory(
+                        { requestRender() {} },
+                        { fg: (_c, s) => s },
+                        {},
+                        () => {},
+                    );
+                    return Promise.reject(rejectErr);
+                },
+            };
+
+            // Match production: discard the returned promise (no await / .catch).
+            openTrackedNavigator(
+                ui,
+                [{ id: "sa_1", name: "r", status: "running", model: "m", elapsed: "1s", spend: "" }],
+                {
+                    matchKey: (d, id) => d === `<${id}>`,
+                    truncate,
+                    onComponent: (c) => { captured = c; },
+                },
+                disposeSlot,
+            );
+
+            assert.ok(captured && typeof captured.dispose === "function", "onComponent captures before reject");
+            // Slot was set sync; rejection clears it on microtask drain.
+            assert.equal(typeof activeDispose, "function", "dispose slot set before rejection settles");
+
+            // Bounded microtask drain (no fixed sleep): let rejection + clear run.
+            await Promise.resolve();
+            await Promise.resolve();
+            await Promise.resolve();
+
+            assert.equal(activeDispose, undefined, "dispose slot cleared on custom() rejection");
+            assert.equal(
+                unhandled.length,
+                0,
+                `expected no unhandledRejection, got: ${unhandled.map((r) => String(r && r.message || r)).join("; ")}`,
+            );
+        } finally {
+            process.off("unhandledRejection", onUnhandled);
+        }
+    });
 });

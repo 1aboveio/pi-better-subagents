@@ -424,13 +424,21 @@ export function showNavigator(ui, rows, deps = {}) {
  * Pi's `ui.custom()` promise resolves to `done()`'s value (`null`), not the
  * component — so dispose MUST be captured synchronously via `onComponent`.
  * The active dispose reference is cleared when the overlay promise settles
- * (normal close) and is safe to invoke from session_shutdown while open.
+ * (fulfill OR reject) and is safe to invoke from session_shutdown while open.
+ *
+ * Settlement cleanup uses `.then(clear, clear)` rather than `.finally(...)`:
+ * `finally` rethrows into a second promise, and `void` does not consume that
+ * rejection — Pi rejects `custom()` when overlay factory/show setup fails, which
+ * would emit `unhandledRejection` (Node 22 exits 1). Both branches are handled
+ * and `clear` never rethrows. Callers (index `openNavigator`) may discard the
+ * returned promise; attach their own handler only if they need the settle value.
  *
  * @param {object} ui - pi UI with `custom()`
  * @param {Array<object>} rows
  * @param {object} deps - showNavigator deps (matchKey, truncate, getDetail, …)
  * @param {{ get: () => (undefined|(() => void)), set: (fn: undefined|(() => void)) => void }} disposeSlot
- * @returns {Promise<unknown>} pi custom() promise (resolves to done value)
+ * @returns {Promise<unknown>} pi custom() promise (done value on fulfill; rejects if custom() rejects).
+ *   Safe to discard: internal handlers consume both settle paths (no unhandledRejection).
  */
 export function openTrackedNavigator(ui, rows, deps, disposeSlot) {
     // Drop any prior overlay's timers before opening a new one (defensive;
@@ -453,11 +461,15 @@ export function openTrackedNavigator(ui, rows, deps, disposeSlot) {
             }
         },
     });
-    void Promise.resolve(opened).finally(() => {
+    // Token-guarded slot cleanup on BOTH settle paths. `.then(clear, clear)`
+    // (not `.finally`) so a rejected custom() does not create a second promise
+    // that rethrows into an unhandledRejection when callers discard the return.
+    const clear = () => {
         if (disposeSlot.get() === disposeToken) {
             disposeSlot.set(undefined);
         }
-    });
+    };
+    void Promise.resolve(opened).then(clear, clear);
     return opened;
 }
 

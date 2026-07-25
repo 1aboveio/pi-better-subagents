@@ -11,6 +11,6 @@
     "kind": "library",
     "status": "pass",
     "command": "node --experimental-strip-types --check index.ts + openTrackedNavigator session_shutdown path",
-    "observed": "index.ts parses; openTrackedNavigator + disposeTrackedNavigator wired; session_shutdown path clears active detail timer under Pi custom()→done(null) semantics; no setFooter"
+    "observed": "index.ts parses; openTrackedNavigator + disposeTrackedNavigator wired; session_shutdown path clears active detail timer under Pi custom()→done(null); custom() rejection clears dispose slot with no unhandledRejection; no setFooter"
   }
 ]
