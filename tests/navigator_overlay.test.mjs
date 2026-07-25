@@ -704,12 +704,13 @@ describe("navigator overlay component", () => {
     // @covers navigator.overlay
     // @level unit
     it("unrelated keys are ignored by the overlay (no close, no repaint)", async () => {
-        // Enter opens detail (#46) and is covered there; list view still ignores
-        // keys that are neither navigation, enter, nor escape.
+        // Enter opens detail (#46) and `x` arms Close (#47); both are covered in
+        // their own suites. List view still ignores keys that are neither
+        // navigation, enter, close, nor escape.
         const o = driveOverlay([{ id: "a", status: "running", model: "m", elapsed: "1s", spend: "" }]);
         await Promise.resolve();
-        o.press("x");
         o.press("z");
+        o.press("q");
         assert.deepEqual(o.doneCalls, []);
         assert.equal(o.tui.renders, 0);
     });

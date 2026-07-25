@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-25T00:00:00.000Z",
+  "generatedAt": "2026-07-26T00:00:00.000Z",
   "surfaces": [
     {
       "id": "widget.render",
@@ -122,6 +122,13 @@
     },
     {
       "id": "navigator.detail",
+      "kind": "service",
+      "class": "mutation",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.close",
       "kind": "service",
       "class": "mutation",
       "path": "navigator.mjs",
