@@ -64,14 +64,17 @@ launch is the result · completion triggers fetch · the foreground never blocks
 Every subagent is confined by default, and the confinement is **self-contained** —
 it does not depend on any other extension being installed.
 
-- **OS sandbox (default on, macOS).** The child runs under `sandbox-exec` with a
-  simple rule: **reads and network are open; writes are confined to the working
-  directory.** Kernel-enforced — unlike a cooperative guardrail that matches tool
-  inputs, this denies the write syscall itself, so a crafted `bash` command can't
-  escape it. `sandbox:false` lifts it; `sandbox_dir` moves the writable root (and
-  becomes the child's cwd). The profile also permits writes to pi's own state
-  (`~/.pi`), system temp, and `/dev` so pi can function; everything else (your
-  home, the repo, `/etc`, …) is read-only to the subagent.
+- **OS sandbox (default on, macOS and Linux).** The child runs under
+  `sandbox-exec` on macOS or [bubblewrap](https://github.com/containers/bubblewrap)
+  (`bwrap`) on Linux with a simple rule: **reads and network are open; writes are
+  confined to the working directory and host `/tmp`.** Kernel-enforced — unlike a
+  cooperative guardrail that matches tool inputs, this denies the write syscall
+  itself, so a crafted `bash` command can't escape it. `sandbox:false` lifts it;
+  `sandbox_dir` moves the writable root (and becomes the child's cwd). `/dev`
+  remains usable. macOS also permits pi state writes under `~/.pi`; Linux exposes
+  that directory read-only, so Linux children must put writable pi state in their
+  work directory or `/tmp`. Everything else (your home, the repo, `/etc`, …) is
+  read-only to the subagent.
 - **Tool allowlist.** The child is scoped to an explicit set of tools, which also
   decides what extension code loads (see below).
 - **No runaway recursion.** A subagent cannot spawn its own subagents unless
@@ -205,6 +208,23 @@ reported per-request cost.
 The live widget, default `subagent_list`, concurrency cap, and `session_start` ticker only include runs this pi process spawned (`spawnPid === process.pid`). The on-disk registry stays machine-global for durability. Pass `subagent_list all:true` for a global view. Id-based `subagent_result` / `subagent_output` / `subagent_stop` still resolve any run id (cross-session recovery).
 
 ## Install
+
+Linux sandboxing requires the system `bubblewrap` package. Install it before
+launching sandboxed children:
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install bubblewrap
+# Fedora/RHEL
+sudo dnf install bubblewrap
+# Arch Linux
+sudo pacman -S bubblewrap
+```
+
+When `bwrap` is absent, explicit sandbox requests fail with an installation hint;
+default-on sandboxing preserves the documented direct-execution fallback. Once
+`bwrap` is selected, a launch failure fails closed rather than retrying the child
+without confinement.
 
 Symlink the project into pi's auto-discovered extensions dir:
 
