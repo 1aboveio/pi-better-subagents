@@ -35,6 +35,41 @@
       "class": "read",
       "path": "widget.mjs",
       "reachable": true
+    },
+    {
+      "id": "sandbox.backend-selection",
+      "kind": "service",
+      "class": "read",
+      "path": "sandbox.ts",
+      "reachable": true
+    },
+    {
+      "id": "sandbox.support-query",
+      "kind": "service",
+      "class": "read",
+      "path": "sandbox.ts",
+      "reachable": true
+    },
+    {
+      "id": "sandbox.command-wrapper",
+      "kind": "service",
+      "class": "mutation",
+      "path": "sandbox.ts",
+      "reachable": true
+    },
+    {
+      "id": "sandbox-profile",
+      "kind": "service",
+      "class": "read",
+      "path": "sandbox.ts",
+      "reachable": true
+    },
+    {
+      "id": "spawn.detached",
+      "kind": "service",
+      "class": "mutation",
+      "path": "spawn.ts",
+      "reachable": true
     }
   ]
 }
