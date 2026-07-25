@@ -18,9 +18,40 @@ SESS="$RUNTIME/sessions"
 CHILD_MODEL="${PI_SUBAGENT_TEST_MODEL:-minimax-cn/MiniMax-M3}"
 TEST_TIMEOUT="${PI_SUBAGENT_TEST_TIMEOUT:-300}"
 
-SUBAGENT_DENY="subagent_spawn,subagent_list,subagent_output,subagent_result,subagent_stop"
-
 mkdir -p "$SESS"
+
+# ext_args TOOLS [MODEL]
+#   Prints the `--no-extensions -e <path> ...` flags index.ts would build for
+#   this tool allowlist, computed by the SAME resolver the extension uses
+#   (extensions.mjs + config.json) so tests can never drift from the product.
+#
+#   This isolation is load-bearing, not cosmetic: a child that loads every
+#   installed package can inherit one that overrides builtin `bash` with an
+#   unref'd detached spawn, which drains the event loop and exits 0 mid-turn.
+#   See test_headless_isolation.sh and the README.
+ext_args() {
+    REPO_DIR="$REPO_DIR" node -e '
+        const [tools, model] = process.argv.slice(1);
+        const { readFileSync, existsSync } = require("node:fs");
+        const { homedir } = require("node:os");
+        const { join } = require("node:path");
+        const repo = process.env.REPO_DIR;
+        import(join(repo, "extensions.mjs")).then(({ resolveExtensions, extensionArgs }) => {
+            let cfg = {};
+            try { cfg = JSON.parse(readFileSync(join(repo, "config.json"), "utf-8")); } catch {}
+            const r = resolveExtensions({ tools, model: model || undefined, config: cfg });
+            const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+            const { args, missing } = extensionArgs(r, (spec) => {
+                if (spec === "self") return repo;
+                const p = spec.startsWith("npm:")
+                    ? join(agentDir, "npm", "node_modules", spec.slice(4)) : spec;
+                return existsSync(p) ? p : undefined;
+            });
+            if (missing.length) { console.error("missing extensions: " + missing.join(", ")); process.exit(1); }
+            console.log(args.join("\n"));
+        });
+    ' "$1" "${2:-}"
+}
 
 # require_macos_sandbox
 #   Exit 0 with SKIP on non-macOS / missing sandbox-exec. Security tests that
@@ -87,15 +118,23 @@ run_child() {
         runcwd="$sbxdir"
     fi
 
+    # Load only the extensions backing these tools, exactly as index.ts does.
+    # No --exclude-tools for the subagent tools: this package isn't loaded in the
+    # child at all, so recursion is prevented by absence rather than by denial.
+    local -a ext=()
+    while IFS= read -r line; do [ -n "$line" ] && ext+=("$line"); done < <(
+        REPO_DIR="$REPO_DIR" ext_args "$tools" "$CHILD_MODEL"
+    )
+
     # A portable timeout wrapper (macOS has no `timeout`): background + watchdog.
     # stdin MUST be closed (< /dev/null): `--mode json` otherwise waits on stdin
     # forever. The extension spawns children with stdin "ignore" for this reason.
     # ${pre[@]+...} guards the empty-array case under `set -u` on bash 3.2 (macOS).
     ( cd "$runcwd" && ${pre[@]+"${pre[@]}"} pi -p --mode json \
         --session-dir "$SESS" --session-id "$id" \
+        ${ext[@]+"${ext[@]}"} \
         --model "$CHILD_MODEL" \
         --tools "$tools" \
-        --exclude-tools "$SUBAGENT_DENY" \
         "$prompt" < /dev/null ) > "$log" 2>&1 &
     local pid=$!
     local waited=0

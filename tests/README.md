@@ -2,8 +2,11 @@
 
 Real, end-to-end smoke tests that a tool-scoped subagent can actually do work.
 Each test runs the **same child invocation `subagent_spawn` builds** in
-`index.ts` (`pi -p --mode json`, tool allowlist, subagent-tool denylist, closed
-stdin, positional prompt) and parses the result the way `parse.ts` does.
+`index.ts` (`pi -p --mode json`, tool allowlist, the extension set derived from
+that allowlist, closed stdin, positional prompt) and parses the result the way
+`parse.ts` does. `lib.sh`'s `ext_args` calls the product resolver
+(`extensions.mjs` + `config.json`) rather than restating the flags, so the tests
+cannot drift from what ships.
 
 | Test | Proves |
 |------|--------|
@@ -13,6 +16,8 @@ stdin, positional prompt) and parses the result the way `parse.ts` does.
 | `test_web_fetch.sh` | An extension-provided tool (`web_fetch`) works in a scoped child: fetch the repo page, report a word count. |
 | `test_gh_issues.sh` | A `bash`-scoped child can drive an external CLI: `gh issue list` against this repo. |
 | `test_env_inherit.sh` | The foreground environment (e.g. `GH_TOKEN`) reaches the subagent **through the OS sandbox** — credential passing. |
+| `test_headless_isolation.sh` | A child survives a parallel `bash` + `read` batch: every `tool_execution_start` has an end, a terminal agent event is reached, and `web_fetch` still works ([#17](https://github.com/1aboveio/pi-better-subagents/issues/17)). |
+| `extensions.test.mjs` | Unit: only packages backing a requested tool are loaded; nothing the model passes can widen the runtime. |
 
 ## Run
 

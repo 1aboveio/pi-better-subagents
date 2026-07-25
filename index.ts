@@ -17,7 +17,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "@earendil-works/pi-ai";
 import { spawnDetached, killProcessTree } from "./spawn.ts";
 import { parseRun, type Usage } from "./parse.ts";
-import { loadConfig, normalizeTools, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
+import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
+import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { buildSandboxCommand, sandboxSupported } from "./sandbox.ts";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -251,22 +252,22 @@ export default function (pi: ExtensionAPI) {
             "Use subagent_spawn for independent work the user should not have to wait on. It returns at once with a run id; that return IS the deliverable — report the id to the user and continue.",
             "After subagent_spawn, do NOT call subagent_output or subagent_result in a loop to wait for the result, and do NOT sleep. The run completes on its own and reports back on the next turn.",
             "Only call subagent_result / subagent_output when the user explicitly asks how a run is going or for its result.",
-            "A subagent has the full tool set by default, including extension tools like web_fetch. Use the tools param to restrict it to an allowlist (e.g. tools='read,bash,web_fetch'), or clean:true for a hermetic built-ins-only child. Pick a model with the model param (e.g. 'xai/grok-4.5').",
+            "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. Pick a model with the model param (e.g. 'xai/grok-4.5').",
             "By default the subagent is sandboxed (writes confined to its working dir, reads and network open) and triggers completion here on finish. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
         ],
         parameters: Type.Object({
             prompt: Type.String({ description: "The task for the subagent. This is the only context it gets — be self-contained." }),
             name: Type.Optional(Type.String({ description: "Short label for the run (e.g. 'reviewer')." })),
             model: Type.Optional(Type.String({ description: "Model as provider/id (default: inherit foreground model)." })),
-            tools: Type.Optional(Type.String({ description: "Tool allowlist: comma-separated names the child may use (e.g. 'read,bash,web_fetch'). Omit to allow all available tools (minus the subagent tools)." })),
+            tools: Type.Optional(Type.String({ description: "Tool allowlist: comma-separated names the child may use (e.g. 'read,bash,web_fetch'). This ALSO selects which extensions load — only packages backing a requested tool are loaded. Defaults to the configured safe set." })),
             exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist, applied on top of the allowlist." })),
-            clean: Type.Optional(Type.Boolean({ description: "Run a hermetic child with NO global extensions (only built-ins: read, bash, edit, write). Default false — extensions load so web_fetch, MCP, and extension-provided model auth (e.g. xai) work." })),
+            clean: Type.Optional(Type.Boolean({ description: "Run a hermetic child with NO extensions at all (only built-ins: read, bash, edit, write). Default false — the extensions backing the requested tools load, so web_fetch and model auth (e.g. xai) work." })),
             sandbox: Type.Optional(Type.Boolean({ description: "Default TRUE (macOS): kernel-confine the child's file WRITES to its working dir — reads and network stay open, but it cannot write outside, whatever it runs. Set false to allow writes anywhere." })),
             sandbox_dir: Type.Optional(Type.String({ description: "Confine writes to (and run the child in) this directory instead of the working dir. Created if missing." })),
             callback: Type.Optional(Type.Boolean({ description: "Default TRUE: on completion, trigger a turn that calls subagent_result and presents the result. Set false to finish quietly — the result is then read on demand via subagent_result." })),
             cwd: Type.Optional(Type.String({ description: "Working directory (default: current)." })),
             approve: Type.Optional(Type.Boolean({ description: "Trust project-local files in the child (default: false; headless runs cannot prompt for trust)." })),
-            allow_nested: Type.Optional(Type.Boolean({ description: "Only relevant with load_extensions: allow the child to spawn its own subagents (default: false)." })),
+            allow_nested: Type.Optional(Type.Boolean({ description: "Allow the child to spawn its own subagents (default: false). Loads this extension in the child and allowlists its tools." })),
         }),
 
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -309,30 +310,57 @@ export default function (pi: ExtensionAPI) {
             if (sandboxDir) mkdirSync(sandboxDir, { recursive: true });
             writeFileSync(promptPathFor(id), p.prompt);
 
-            // Extensions load by default so the child has web_fetch, MCP, and
-            // extension-provided model auth (e.g. xai/grok via pi-xai-oauth).
-            // `clean:true` opts into a hermetic built-ins-only child.
+            // `clean:true` is a hermetic builtins-only child — now just the
+            // narrowest case of the same isolation mechanism below.
             const clean = p.clean === true;
 
             // Tool allowlist precedence: per-call > config default > safe default
             // (built-ins-only when the child is hermetic, since extension tools
             // like web_fetch don't exist there).
-            const allow = normalizeTools(
+            let allow = normalizeTools(
                 p.tools ?? cfg.defaultTools ?? (clean ? SAFE_CLEAN_TOOLS : SAFE_DEFAULT_TOOLS),
             );
+            // Nesting needs BOTH our package loaded and its tools allowlisted;
+            // granting one without the other silently yields a child that cannot
+            // actually spawn. Add them here so allow_nested means what it says.
+            if (p.allow_nested) {
+                const have = new Set(allow.split(","));
+                allow = [...allow.split(","), ...SUBAGENT_TOOLS.filter((t) => !have.has(t))]
+                    .filter(Boolean).join(",");
+            }
+
+            // Which extension CODE loads in the child, DERIVED from the tool
+            // allowlist (issue #17). Children run `--no-extensions -e <needed>`:
+            // a package that backs no requested tool never loads, so it cannot
+            // override builtin `bash` or unref the event loop and drain the run
+            // mid-turn. This is the only mechanism pi offers for exclusion —
+            // there is no "load all except X" flag.
+            const resolution = resolveExtensions({
+                tools: allow, model, clean, allowNested: p.allow_nested, config: cfg,
+            });
+            const { args: extArgs, missing } = extensionArgs(resolution, resolveExtensionPath);
+            if (missing.length) {
+                throw new Error(
+                    `Subagent needs extension(s) that are not installed: ${missing.join(", ")}. ` +
+                    `Install them, drop the tools that require them, or remove the mapping from config.json.`,
+                );
+            }
 
             const excludes = new Set<string>();
-            // With extensions loaded, THIS extension loads in the child too, so
-            // deny the subagent tools to stop unbounded recursion (unless the
-            // caller explicitly allows nesting). In a clean child they don't exist.
-            if (!clean && !p.allow_nested) for (const t of SUBAGENT_TOOLS) excludes.add(t);
             if (p.exclude_tools) for (const t of p.exclude_tools.split(",")) if (t.trim()) excludes.add(t.trim());
+            // Our own package only loads in the child when nesting is allowed,
+            // so recursion is prevented by NOT LOADING the tools rather than by
+            // denying them after the fact. Belt-and-braces for `inherit` mode,
+            // where every installed package (including this one) does load.
+            if (!p.allow_nested && resolution.mode === "inherit") {
+                for (const t of SUBAGENT_TOOLS) excludes.add(t);
+            }
 
             const args = [
                 "-p", "--mode", "json",
                 "--session-dir", sessionsDir(),
                 "--session-id", id,
-                ...(clean ? ["--no-extensions"] : []),
+                ...extArgs,
                 ...(model ? ["--model", model] : []),
                 ...(allow ? ["--tools", allow] : []),
                 ...(excludes.size ? ["--exclude-tools", [...excludes].join(",")] : []),
@@ -374,12 +402,26 @@ export default function (pi: ExtensionAPI) {
             uiCtx = ctx;
             ensureTicker();
 
+            // Show what the child actually loaded. An unmapped tool is the one
+            // quiet failure left in this path: the child launches fine and the
+            // tool simply is not there, so name it at launch.
+            const runtime = resolution.mode === "inherit"
+                ? `Runtime: ALL installed extensions (inheritExtensions) — mid-turn drain risk\n`
+                : resolution.specs.length
+                    ? `Runtime: isolated · extensions ${resolution.specs.join(", ")}\n`
+                    : `Runtime: isolated · built-in tools only\n`;
+            const warn = resolution.unmapped.length
+                ? `NOTE: no extension mapped for ${resolution.unmapped.join(", ")} — ` +
+                  `${resolution.unmapped.length > 1 ? "these tools" : "this tool"} will NOT exist in the child. ` +
+                  `Add a toolExtensions entry in config.json.\n`
+                : "";
             return text(
                 `Subagent launched: ${p.name ? `${p.name} ` : ""}id=${id} (pid ${spawned.pid}).\n` +
                 (p.callback === false
                     ? `Running in the background; the foreground is free. It will finish quietly — read the result with subagent_result id=${id}.\n`
                     : `Running in the background; the foreground is free. Its result will be posted back here when it finishes.\n`) +
                 (sandboxDir ? `Sandboxed: writes confined to ${sandboxDir}\n` : "") +
+                runtime + warn +
                 `Log: ${logPathFor(id)}`,
             );
         },
