@@ -1,0 +1,1 @@
+rebase closeout onto origin/main@36f36ae (batch-spawn shared spawnSubagentRun): resolve README/index conflicts by integrating git_clone_workspace into spawnSubagentRun + batch schemas; refresh Review Contract evidence and contract revision
