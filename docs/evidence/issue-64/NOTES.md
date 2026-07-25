@@ -127,10 +127,21 @@ even when compaction fails early.
 
 **Not reproduced in short print-mode (`-p --mode json`) child runs:**
 
-- Auto threshold compaction: MiniMax-M3 reports `contextWindow: 512000`.
-  `shouldCompact` is `contextTokens > contextWindow - reserveTokens`. Even with
-  aggressive `reserveTokens` and multi‑10k token prompts, a short discovery run
-  did not cross the threshold; no `compaction_*` lines appeared in print logs.
+- Auto threshold compaction: a print run with a ~24.6k-token prompt
+  (`totalTokens=24605`) and *claimed* `reserveTokens=1_000_000` produced **no**
+  `compaction_*` lines (skeleton retained). The earlier claim that this was
+  because the threshold was "impractical" for `contextWindow=512000` is
+  **incorrect under those claimed numbers**:
+  `shouldCompact` is `enabled && contextTokens > contextWindow - reserveTokens`,
+  so with `reserveTokens=1_000_000` the headroom is `-488000` and
+  `shouldCompact(24605, 512000, claimed) === true`. Cause of the missing events
+  is therefore **unverified** — effective loaded settings, cut-point /
+  `prepareCompaction` outcome, and agent version were not retained from the
+  original process. Plausible alternatives (settings never applied → default
+  reserve keeps `shouldCompact` false; or settings applied but auto path's
+  `prepareCompaction` returned undefined and `_runAutoCompaction` returned
+  without emitting events) are listed in
+  `raw/compaction-attempt-large-prompt.NOTES.txt`.
 - Successful compaction with a non-null `result` summary was not captured.
 
 Attempt record: `raw/compaction-attempt-large-prompt.NOTES.txt` and
@@ -203,7 +214,7 @@ detection without also recording the model-error dimension (epic #60).
 |----------|--------|
 | Can compaction be detected **explicitly**? | **Yes**, when `compaction_start` / `compaction_end` appear in the child JSON stream. |
 | Are those events confirmed real? | **Yes** — captured via RPC manual compact (`fixtures/compaction-rpc-manual.ndjson`). Envelope matches upstream `AgentSessionEvent`. |
-| Was auto-compact captured in a print-mode subagent log? | **No** in this discovery pass (context window / threshold practicality). |
+| Was auto-compact captured in a print-mode subagent log? | **No** in this discovery pass. Cause **unverified** — claimed aggressive `reserveTokens` would have made `shouldCompact` true; see attempt NOTES (not "threshold impractical"). |
 | Was a **successful** compact (`result` present, `aborted: false`, no `errorMessage`) captured? | **No**. |
 | Inference without events? | **Not recommended** for UI truth. Long silence ≠ compaction. Epic out-of-scope already forbids presenting weak inference as fact. |
 | Health implication | Implement **explicit** compaction dimension gated on `compaction_*`. Until a successful auto-compact print-mode fixture exists, still trust the event types; optionally add a follow-up capture later. Between `start` and `end`, surface `compacting`; on `end` with error, record failure detail; on `end` success, clear compacting. |
@@ -269,7 +280,9 @@ None of the above + no meaningful events past threshold ⇒ residual **stale**.
 ## 6. Limitations & follow-ups
 
 1. **Successful auto-compaction** in a real `-p --mode json` subagent log still
-   wanted (small `contextWindow` model or overflow path).
+   wanted (multi-turn history that yields a non-empty cut / overflow path),
+   with effective `getCompactionSettings()` + cut-point evidence retained so
+   the next attempt does not leave the no-event cause unverified.
 2. **Pure network timeout / ECONNREFUSED** mid-stream not cleanly captured; 401
    and 503 paths were.
 3. **Timestamps:** many events have no top-level `ts`; activity timing may need

@@ -495,7 +495,7 @@
         "success": true,
         "data": {
           "model": {
-            "id": "MiniMax-…",
+            "id": "MiniMax-\u2026",
             "name": "MiniMax-M3",
             "api": "anthropic-messages",
             "provider": "minimax-cn",
@@ -549,7 +549,7 @@
         "success": true,
         "data": {
           "model": {
-            "id": "MiniMax-…",
+            "id": "MiniMax-\u2026",
             "name": "MiniMax-M3",
             "api": "anthropic-messages",
             "provider": "minimax-cn",
@@ -596,7 +596,18 @@
       "agent_settled": 1
     },
     "compaction_events_seen": false,
-    "note": "Aggressive compaction settings + large prompt under PI_CODING_AGENT_DIR; MiniMax-M3 contextWindow=512000 made threshold auto-compact impractical. No compaction_* events observed in --mode json print run."
+    "note": "Print-mode attempt with claimed compaction.reserveTokens=1000000, keepRecentTokens=200, MiniMax-M3 contextWindow=512000, assistant totalTokens\u224824605. No compaction_* events observed. CAUSE UNVERIFIED: under those claimed settings shouldCompact(24605, 512000, {enabled:true, reserveTokens:1000000}) is TRUE (threshold headroom = -488000), so absence cannot be attributed to failing to cross the threshold. Effective loaded settings / prepareCompaction cut-point outcome / agent version were not retained from the original process. See raw/compaction-attempt-large-prompt.NOTES.txt for open alternatives (settings not applied; or prepareCompaction undefined \u2192 silent auto no-op before compaction_start).",
+    "cause_status": "unverified",
+    "observed": {
+      "claimed_reserveTokens": 1000000,
+      "claimed_keepRecentTokens": 200,
+      "contextWindow_rpc_same_model_family": 512000,
+      "assistant_totalTokens": 24605,
+      "shouldCompact_under_claimed_settings": true,
+      "threshold_headroom_under_claimed_settings": -488000,
+      "effective_settings_captured": false,
+      "cut_point_outcome_captured": false
+    }
   },
   "raw-noise": {
     "samples_path": "docs/evidence/issue-64/redacted/raw-noise-samples.txt",

@@ -44,6 +44,25 @@ function hasAssistantUsage(events) {
     });
 }
 
+function assistantTextContent(message) {
+    const content = message?.content;
+    if (!Array.isArray(content)) return [];
+    return content
+        .filter((part) => part?.type === "text" && typeof part.text === "string")
+        .map((part) => part.text);
+}
+
+function hasSuccessfulAssistantResponse(events) {
+    return events.some((e) => {
+        if (e.type !== "message_end") return false;
+        const m = e.message;
+        if (m?.role !== "assistant") return false;
+        if (m.stopReason === "error" || m.errorMessage) return false;
+        if (typeof m.stopReason !== "string" || m.stopReason.length === 0) return false;
+        return assistantTextContent(m).some((text) => text.trim().length > 0);
+    });
+}
+
 describe("issue #64 child event signature fixtures", () => {
     it("keeps discovery notes and noise samples committed", () => {
         assert.ok(existsSync(NOTES), "NOTES.md required");
@@ -58,10 +77,27 @@ describe("issue #64 child event signature fixtures", () => {
     });
 
     it("captures a normal model response lifecycle", () => {
-        const types = typesOf(loadEvents("normal-model-response.ndjson"));
+        const events = loadEvents("normal-model-response.ndjson");
+        const types = typesOf(events);
         for (const t of ["session", "agent_start", "turn_start", "message_end", "agent_end", "agent_settled"]) {
             assert.ok(types.has(t), `normal fixture missing ${t}`);
         }
+        // AC1: require a real assistant completion, not merely any message_end (user echo).
+        assert.ok(
+            hasSuccessfulAssistantResponse(events),
+            "normal fixture needs assistant message_end with non-error stopReason and text content",
+        );
+        const assistantEnd = events.find((e) => {
+            if (e.type !== "message_end" || e.message?.role !== "assistant") return false;
+            if (e.message?.stopReason === "error" || e.message?.errorMessage) return false;
+            return assistantTextContent(e.message).some((t) => t.trim().length > 0);
+        });
+        assert.ok(assistantEnd);
+        assert.notEqual(assistantEnd.message.stopReason, "error");
+        assert.ok(
+            assistantTextContent(assistantEnd.message).some((t) => t.trim().length > 0),
+            "assistant response content must be non-empty text",
+        );
     });
 
     it("captures tool_execution_start and tool_execution_end", () => {
@@ -85,10 +121,19 @@ describe("issue #64 child event signature fixtures", () => {
         const events = loadEvents("usage-cost-events.ndjson");
         assert.ok(hasAssistantUsage(events), "assistant usage block required");
         const usageEvent = events.find((e) => e.type === "message_end" && e.message?.role === "assistant" && e.message?.usage);
+        assert.ok(usageEvent, "assistant message_end with usage required");
         const usage = usageEvent.message.usage;
-        assert.ok(usage.cost === undefined || typeof usage.cost === "object");
-        if (usage.cost) {
-            assert.ok("total" in usage.cost || "input" in usage.cost);
+        // AC3: cost object is required evidence, not optional.
+        assert.equal(typeof usage.cost, "object");
+        assert.ok(usage.cost && !Array.isArray(usage.cost), "usage.cost object required");
+        assert.equal(typeof usage.cost.total, "number", "usage.cost.total must be numeric");
+        assert.ok(Number.isFinite(usage.cost.total), "usage.cost.total must be finite");
+        // Prefer the common input/output cost fields when present.
+        if ("input" in usage.cost) {
+            assert.equal(typeof usage.cost.input, "number");
+        }
+        if ("output" in usage.cost) {
+            assert.equal(typeof usage.cost.output, "number");
         }
     });
 

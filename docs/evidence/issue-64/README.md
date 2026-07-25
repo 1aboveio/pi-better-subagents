@@ -35,7 +35,7 @@ supported by the test harness).
 | Usage / cost events | `fixtures/usage-cost-events.ndjson` |
 | Terminal agent events | present in normal + tool fixtures (`agent_end`, `agent_settled`) |
 | Model / network errors | `fixtures/model-error-bad-model.ndjson`, `fixtures/model-error-network.ndjson` |
-| Compaction | `fixtures/compaction-rpc-manual.ndjson` + attempt notes (auto-compact not reproduced in short print runs) |
+| Compaction | `fixtures/compaction-rpc-manual.ndjson` + attempt notes (auto-compact not reproduced; no-event cause unverified — see NOTES) |
 | Raw non-JSON noise | `redacted/raw-noise-samples.txt` |
 | Meaningful-activity guidance | `NOTES.md` |
 | Compaction / model-call detectability | `NOTES.md` |
