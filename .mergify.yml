@@ -13,14 +13,12 @@
 shared:
   # PR gate — light checks from .github/workflows/ci.yml (job name: ci).
   # Defined once; asserted as queue entry + merge-protection check-run.
-  gate: &gate
-    check-success = ci
+  gate: &gate check-success = ci
 
   # Queue gate — integration tests from .github/workflows/integration-tests.yml
   # (job name: integration). Runs only on mergify/merge-queue/* branches, so it
   # is absent on ordinary PRs and must NOT be in queue_conditions.
-  queue_gate: &queue_gate
-    check-success = integration
+  queue_gate: &queue_gate check-success = integration
 
 queue_rules:
   - name: default
@@ -80,6 +78,7 @@ priority_rules:
     priority: high
 
 # Escape hatch 2: skip the queue entirely (break glass).
+    allow_checks_interruption: true
 pull_request_rules:
   - name: emergency merge — skips the queue, use only when the queue cannot run
     conditions:
