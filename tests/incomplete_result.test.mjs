@@ -37,9 +37,13 @@ describe("subagent_result for incomplete child exits", () => {
     // @covers subagent.result
     // @level unit
     it("is wired into the registered subagent_result tool", () => {
-        const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+        // Handlers live in tools.ts; index.ts registers the factory result so the
+        // model reaches the same execute path tests drive (no drift-prone copy).
+        const toolsSource = readFileSync(new URL("../tools.ts", import.meta.url), "utf8");
+        const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
 
-        assert.match(source, /formatIncompleteResult/);
-        assert.match(source, /failureReason === "incomplete-stream"/);
+        assert.match(toolsSource, /formatIncompleteResult/);
+        assert.match(toolsSource, /failureReason === "incomplete-stream"/);
+        assert.match(indexSource, /subagentResultTool\(Type\)/);
     });
 });

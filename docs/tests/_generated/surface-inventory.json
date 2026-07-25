@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-25T00:00:00.000Z",
+  "generatedAt": "2026-07-26T02:00:00.000Z",
   "surfaces": [
     {
       "id": "widget.render",
@@ -69,6 +69,76 @@
       "kind": "service",
       "class": "read",
       "path": "health.ts",
+      "reachable": true
+    },
+    {
+      "id": "registry.dismissal",
+      "kind": "service",
+      "class": "mutation",
+      "path": "registry.ts",
+      "reachable": true
+    },
+    {
+      "id": "registry.navigator-visibility",
+      "kind": "service",
+      "class": "read",
+      "path": "registry.ts",
+      "reachable": true
+    },
+    {
+      "id": "stop.shared",
+      "kind": "service",
+      "class": "mutation",
+      "path": "stop.ts",
+      "reachable": true
+    },
+    {
+      "id": "tools.model-facing",
+      "kind": "service",
+      "class": "mutation",
+      "path": "tools.ts",
+      "reachable": true
+    },
+    {
+      "id": "navigator.footer-hint",
+      "kind": "service",
+      "class": "mutation",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.editor-wrapper",
+      "kind": "service",
+      "class": "mutation",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.overlay",
+      "kind": "service",
+      "class": "read",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.detail",
+      "kind": "service",
+      "class": "mutation",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.close",
+      "kind": "service",
+      "class": "mutation",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.hardening",
+      "kind": "service",
+      "class": "mutation",
+      "path": "navigator.mjs",
       "reachable": true
     }
   ]

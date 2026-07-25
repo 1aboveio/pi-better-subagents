@@ -12,12 +12,14 @@
  */
 
 import { execSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs";
+import { writeFileSync, mkdirSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@earendil-works/pi-ai";
-import { spawnDetached, killProcessTree, type SpawnResult } from "./spawn.ts";
-import { parseRun, tailLog, formatSubagentOutputBody, formatSubagentResultBody, type Usage } from "./parse.ts";
-import { classifyChildExit, formatIncompleteResult } from "./lifecycle.ts";
+import { spawnDetached, type SpawnResult } from "./spawn.ts";
+import { parseRun, type Usage } from "./parse.ts";
+import { classifyChildExit } from "./lifecycle.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { maybeBuildSandboxCommand } from "./sandbox.ts";
@@ -33,9 +35,11 @@ import {
     readMeta,
     listMetas,
     effectiveStatus,
-    isFinalResultStatus,
     ownedByThisParent,
     canExitFinalize,
+    navigatorVisibleRuns,
+    navigatorVisibleCount,
+    dismissRun,
     type RunMeta,
 } from "./registry.ts";
 import {
@@ -59,21 +63,38 @@ import {
 } from "./capacity.mjs";
 import { formatCallbackTrigger, formatCallbackQuiet, buildCompletionDelivery } from "./completion.ts";
 import {
+    text,
+    subagentListTool,
+    subagentOutputTool,
+    subagentResultTool,
+    subagentStopTool,
+} from "./tools.ts";
+import { stopRun } from "./stop.ts";
+import {
     SPINNER,
     TICK_MS,
     WIDGET_CLEAR,
     fmtElapsed,
     fmtSpend,
+    shortModel,
     buildWidgetLines,
     nextWidgetAction,
     isSpendCacheFresh,
 } from "./widget.ts";
 import {
-    SUBAGENT_LIST_DEFAULT_LIMIT,
-    SUBAGENT_LIST_MAX_LIMIT,
-    SUBAGENT_LIST_STATUSES,
-    buildSubagentList,
-} from "./list.ts";
+    NAVIGATOR_STATUS_KEY,
+    CLOSE_CONFIRM_STATUS_KEY,
+    navigatorFooterHint,
+    applyNavigatorFooter,
+    applyCloseConfirmFooter,
+    executeNavigatorClose,
+    isNavigatorUiAvailable,
+    buildNavigatorRows,
+    buildNavigatorDetail,
+    installNavigatorEditor,
+    openTrackedNavigator,
+    disposeTrackedNavigator,
+} from "./navigator.ts";
 
 /** The tools this extension registers — excluded from children by default so a
  *  subagent cannot recursively spawn more subagents unless explicitly allowed. */
@@ -85,8 +106,6 @@ const SUBAGENT_TOOLS = [
     "subagent_stop",
     "subagent_result",
 ];
-
-const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
 // ---- live status widget (Claude Code-style) ------------------------------
 //
@@ -267,6 +286,128 @@ export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void 
     spawnIdentityProbe = probe ?? realProcessProbe;
 }
 
+// ---- minimal subagent navigator (empty-editor ←, #45) --------------------
+// ---- subagent navigator (empty-editor ← list #45, live detail #46) --------
+// ---- subagent navigator (list #45, detail #46, two-press close #47) -------
+//
+// Human-facing TUI surface, kept separate from the passive live widget (which
+// is untouched). Glue points, all gated on isNavigatorUiAvailable so print/RPC
+// sessions never see any of it:
+//   1. footer hint `← subagents · N` via the DEFAULT footer status mechanism
+//      (setStatus — the full footer is never replaced);
+//   2. an editor wrapper that intercepts bare ← only when the editor is empty
+//      and visible runs exist, delegating everything else to the wrapped
+//      editor (composition via navigator.mjs, tested with fakes);
+//   3. a focused overlay (ctx.ui.custom(..., { overlay: true })) listing the
+//      #44 navigatorVisibleRuns newest first, with Enter → live detail view
+//      that refreshes once per second (#46) and two-press `x` Close (#47).
+//      Detail + close-arm timers dispose on back, Escape, overlay close,
+//      selection change, list↔detail return, and session_shutdown.
+
+/** Last footer hint published (undefined ⇒ never set); dirty-check guard. */
+let lastNavigatorHint: string | null | undefined;
+
+/** Active navigator overlay dispose hook (clears detail timers on teardown). */
+let activeNavigatorDispose: (() => void) | undefined;
+
+/** Rows for the overlay: visible current-parent runs, newest first (#44 seam). */
+function navigatorRows() {
+    return buildNavigatorRows(navigatorVisibleRuns(listMetas()), {
+        effectiveStatus,
+        shortModel,
+        fmtElapsed,
+        spendFor: (m: RunMeta) => fmtSpend(parseRun(m.id).usage),
+    });
+}
+
+/** Live detail snapshot for one run (registry + log parse). */
+function navigatorDetail(id: string) {
+    return buildNavigatorDetail(id, {
+        readMeta,
+        effectiveStatus,
+        parseRun,
+        shortModel,
+        fmtElapsed,
+        fmtSpend,
+    });
+}
+
+/** Mutable slot holding the active overlay's dispose hook. */
+const navigatorDisposeSlot = {
+    get: () => activeNavigatorDispose,
+    set: (fn: (() => void) | undefined) => { activeNavigatorDispose = fn; },
+};
+
+/** Shared #44 stop+dismiss path used by navigator Close (#47). */
+function navigatorCloseRun(id: string) {
+    return executeNavigatorClose(id, {
+        readMeta,
+        effectiveStatus,
+        stopRun,
+        dismissRun,
+    });
+}
+
+/** Publish/clear the Close confirmation footer hint (TUI only). */
+function publishCloseConfirmHint(ctx: ExtensionContext, hint: string | null): void {
+    if (!isNavigatorUiAvailable(ctx)) return;
+    try {
+        applyCloseConfirmFooter(ctx.ui, hint);
+    } catch { /* ignore */ }
+}
+
+/** Open the focused navigator overlay. No-op without a UI or visible runs. */
+function openNavigator(ctx: ExtensionContext): void {
+    if (!isNavigatorUiAvailable(ctx)) return;
+    const rows = navigatorRows();
+    if (rows.length === 0) return;
+    try {
+        // Pi's ui.custom() resolves with done()'s value (null), NOT the component.
+        // openTrackedNavigator captures dispose synchronously via onComponent
+        // and clears the slot when the overlay promise settles.
+        openTrackedNavigator(ctx.ui, rows, {
+            matchKey: matchesKey,
+            truncate: truncateToWidth,
+            getDetail: (id: string) => navigatorDetail(id),
+            getRows: () => navigatorRows(),
+            closeRun: (id: string) => navigatorCloseRun(id),
+            onCloseConfirmHint: (hint: string | null) => publishCloseConfirmHint(ctx, hint),
+            onClosed: () => {
+                // Refresh footer count after a dismiss; force dirty-check miss.
+                lastNavigatorHint = undefined;
+                updateNavigatorFooter(ctx);
+                // A kill may have changed the live widget's set of running runs.
+                try { renderWidget(); } catch { /* ignore */ }
+            },
+        }, navigatorDisposeSlot);
+    } catch { /* never let UI glue break the session */ }
+}
+
+/** Publish/clear the `← subagents · N` footer hint (dirty-checked). */
+function updateNavigatorFooter(ctx: ExtensionContext | undefined): void {
+    if (!isNavigatorUiAvailable(ctx)) return;
+    try {
+        const hint = navigatorFooterHint(navigatorVisibleCount(listMetas()));
+        if (hint === lastNavigatorHint) return;
+        applyNavigatorFooter(ctx!.ui, navigatorVisibleCount(listMetas()));
+        lastNavigatorHint = hint;
+    } catch { /* ignore */ }
+}
+
+/** Install the empty-editor ← wrapper once per UI (reload-safe, composable). */
+function installNavigator(ctx: ExtensionContext): void {
+    if (!isNavigatorUiAvailable(ctx)) return;
+    try {
+        installNavigatorEditor(ctx.ui, {
+            createDefaultEditor: (tui: any, theme: any, keybindings: any) =>
+                new CustomEditor(tui, theme, keybindings),
+            isOpenTrigger: (data: string) => matchesKey(data, Key.left),
+            canOpen: () => navigatorVisibleCount(listMetas()) > 0,
+            onOpen: () => openNavigator(ctx),
+        });
+    } catch { /* ignore */ }
+}
+
 /** Resolve the pi binary once per session. */
 let cachedPi: string | undefined;
 function resolvePiBinary(): string {
@@ -278,7 +419,6 @@ function resolvePiBinary(): string {
     }
     return cachedPi;
 }
-
 
 /**
  * Finalize a run once its child exits. Idempotent: a run already marked
@@ -444,6 +584,8 @@ export default function (pi: ExtensionAPI) {
         ensureTicker();
         // Start periodic supervision reconciliation (self-stops when idle).
         ensureHealthTicker();
+        // Footer hint: a visible run now exists, so `← subagents · N` shows.
+        updateNavigatorFooter(ctx);
 
         const runtime = resolution.mode === "inherit"
             ? `Runtime: ALL installed extensions (inheritExtensions) — mid-turn drain risk\n`
@@ -680,140 +822,15 @@ export default function (pi: ExtensionAPI) {
         },
     });
 
-    // ---- subagent_list --------------------------------------------------
-    pi.registerTool({
-        name: "subagent_list",
-        label: "List Subagents",
-        description:
-            `List background subagent runs with status and metadata. Non-blocking. ` +
-            `Default: this parent process only, newest first, limit ${SUBAGENT_LIST_DEFAULT_LIMIT}. ` +
-            `Pass all:true for machine-global; limit is clamped to max ${SUBAGENT_LIST_MAX_LIMIT}.`,
-        promptSnippet: "List background subagent runs and their status",
-        parameters: Type.Object({
-            all: Type.Optional(Type.Boolean({ description: "If true, list every run on this machine. Default false = only runs spawned by this pi process." })),
-            limit: Type.Optional(Type.Number({ description: `Maximum rows to display (default ${SUBAGENT_LIST_DEFAULT_LIMIT}, max ${SUBAGENT_LIST_MAX_LIMIT}; larger values are clamped).` })),
-            status: Type.Optional(Type.Array(Type.String(), { description: `Effective statuses to include: ${SUBAGENT_LIST_STATUSES.join(", ")}.` })),
-        }),
-        async execute(_toolCallId, params) {
-            const p = (params ?? {}) as { all?: boolean; limit?: number; status?: string[] | string };
-            return text(buildSubagentList({
-                metas: listMetas(),
-                params: p,
-                parentPid: process.pid,
-                now: Date.now(),
-                statusOf: effectiveStatus,
-                usageById: (id: string) => parseRun(id).usage,
-            }));
-        },
-    });
-
-    // ---- subagent_output ------------------------------------------------
-    pi.registerTool({
-        name: "subagent_output",
-        label: "Subagent Output",
-        description:
-            "Tail the live output of a subagent run. Non-blocking: returns whatever exists right now and " +
-            "returns immediately whether or not the run has finished. Never waits.",
-        promptSnippet: "Peek at a subagent's current output without waiting",
-        promptGuidelines: [
-            "Use subagent_output only when the user explicitly asks how a run is progressing. It never waits — do not call it in a loop.",
-        ],
-        parameters: Type.Object({
-            id: Type.String({ description: "Run id from subagent_spawn." }),
-            tail_lines: Type.Optional(Type.Number({ description: "How many trailing lines to show (default 40)." })),
-        }),
-        async execute(_id, params) {
-            const p = params as { id: string; tail_lines?: number };
-            const meta = readMeta(p.id);
-            if (!meta) throw new Error(`Unknown run id: ${p.id}`);
-            const st = effectiveStatus(meta);
-            const r = parseRun(p.id);
-            const el = fmtElapsed((meta.endedAt ?? Date.now()) - meta.startedAt);
-            const spend = fmtSpend(r.usage);
-            const head = `[${p.id} · ${st} · ${el}${spend ? ` · ${spend}` : ""}]`;
-            const tools = r.toolCalls.length ? `\ntools used: ${r.toolCalls.join(", ")}` : "";
-            const raw = tailLog(p.id, p.tail_lines ?? 40);
-            return text(formatSubagentOutputBody(head, tools, r.finalText || r.lastActivity || undefined, raw, r.diagnostics));
-        },
-    });
-
-    // ---- subagent_result ------------------------------------------------
-    pi.registerTool({
-        name: "subagent_result",
-        label: "Subagent Result",
-        description:
-            "Read a subagent's final output if it has finished. NEVER waits: if the run is still going it " +
-            "says so and returns immediately.",
-        promptSnippet: "Read a finished subagent's final result (never waits)",
-        promptGuidelines: [
-            "Use subagent_result to collect a finished run's output. If it reports the run is still going, stop — do not poll; you'll be notified when it finishes.",
-        ],
-        parameters: Type.Object({
-            id: Type.String({ description: "Run id from subagent_spawn." }),
-        }),
-        async execute(_id, params) {
-            const p = params as { id: string };
-            const meta = readMeta(p.id);
-            if (!meta) throw new Error(`Unknown run id: ${p.id}`);
-            const st = effectiveStatus(meta);
-            if (!isFinalResultStatus(st)) {
-                if (st === "orphaned") {
-                    // Non-terminal: supervision is broken but related process-
-                    // group work may still be alive — never present this as a
-                    // final result.
-                    return text(
-                        `Run ${p.id} is orphaned — supervision was lost, but related processes may still be alive. ` +
-                        `There is no final result; use subagent_output for current (possibly still changing) output.`,
-                    );
-                }
-                return text(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`);
-            }
-            const exit = meta.exitCode === undefined ? "?" : String(meta.exitCode);
-            const r = parseRun(p.id);
-            const el = fmtElapsed((meta.endedAt ?? Date.now()) - meta.startedAt);
-            const spend = fmtSpend(r.usage);
-            const statSeg = ` · ${el}${spend ? ` · ${spend}` : ""}`;
-            const tools = r.toolCalls.length ? ` · tools: ${r.toolCalls.join(", ")}` : "";
-            const diagnostic = st === "lost"
-                ? `\nRun is lost: no related process remains and no coherent terminal result was observed. Best-available artifacts below.`
-                : "";
-            const rawTail = tailLog(p.id, 40);
-            if (meta.failureReason === "incomplete-stream") {
-                return text(`[${p.id} · ${st} · exit ${exit}${statSeg}${tools}]\n${formatIncompleteResult(r, rawTail)}`);
-            }
-            return text(formatSubagentResultBody(
-                `[${p.id} · ${st} · exit ${exit}${statSeg}${tools}]${diagnostic}`,
-                r.finalText || undefined,
-                rawTail,
-                r.diagnostics,
-            ));
-        },
-    });
-
-    // ---- subagent_stop --------------------------------------------------
-    pi.registerTool({
-        name: "subagent_stop",
-        label: "Stop Subagent",
-        description: "Terminate a running subagent (SIGTERM to its process group).",
-        promptSnippet: "Stop a running background subagent",
-        parameters: Type.Object({
-            id: Type.String({ description: "Run id from subagent_spawn." }),
-        }),
-        async execute(_id, params) {
-            const p = params as { id: string };
-            const meta = readMeta(p.id);
-            if (!meta) throw new Error(`Unknown run id: ${p.id}`);
-            if (effectiveStatus(meta) !== "running") {
-                return text(`Run ${p.id} is not running (${effectiveStatus(meta)}).`);
-            }
-            killProcessTree(meta.pid, "SIGTERM");
-            meta.status = "killed";
-            meta.endedAt = Date.now();
-            writeMeta(meta);
-            renderWidget();
-            return text(`Stopped subagent ${p.id}.`);
-        },
-    });
+    // ---- model-facing read/stop tools -----------------------------------
+    // The definitions live in tools.ts; registration uses the exact objects
+    // the factories return, so tests invoke the same execute handlers the
+    // model reaches (no drift-prone second copy). Stop's only UI side effect
+    // (widget redraw after a kill) is injected as onStopped.
+    pi.registerTool(subagentListTool(Type));
+    pi.registerTool(subagentOutputTool(Type));
+    pi.registerTool(subagentResultTool(Type));
+    pi.registerTool(subagentStopTool(Type, { onStopped: renderWidget }));
 
     // ---- live-status lifecycle -----------------------------------------
     // Capture a UI-bearing context and, if runs from a prior session are still
@@ -821,6 +838,19 @@ export default function (pi: ExtensionAPI) {
     // "no background resources at load" rule.
     pi.on("session_start", async (_event, ctx) => {
         uiCtx = ctx;
+        // Reload / session switch hardening (#48):
+        // - Drop any leftover overlay timers/confirm state from a prior session
+        //   (defensive if the host skipped session_shutdown before re-start).
+        // - Reinstall the editor wrapper without stacking (marked factory).
+        // - Clear + republish footer statuses (pi clears extension statuses on
+        //   session switch/reload; dirty-check only dedupes within a session).
+        disposeTrackedNavigator(navigatorDisposeSlot);
+        if (isNavigatorUiAvailable(ctx)) {
+            try { ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, undefined); } catch { /* ignore */ }
+        }
+        installNavigator(ctx);
+        lastNavigatorHint = undefined;
+        updateNavigatorFooter(ctx);
         if (listMetas().some((m) => ownedByThisParent(m) && effectiveStatus(m) === "running")) ensureTicker();
         else renderWidget();
         // Resume supervision reconciliation across /reload while current-parent
@@ -833,7 +863,19 @@ export default function (pi: ExtensionAPI) {
         stopTicker();
         stopHealthTicker();
         spendCache.clear();
+        // Always dispose navigator detail timers (no UI call — just clearInterval).
+        // Safe in every mode; the dispose hook is only set when a TUI overlay opened.
+        disposeTrackedNavigator(navigatorDisposeSlot);
+        // Widget clear is intentional in every mode that exposes ui (incl. RPC
+        // — pi docs: setWidget works in both TUI and RPC). Navigator cleanup
+        // is TUI-only: the footer hint is never published outside TUI, so
+        // clearing it in RPC would be a pure UI leak (setStatus subagents-nav).
         try { ctx.ui.setWidget("subagents", WIDGET_CLEAR); } catch { /* ignore */ }
+        if (isNavigatorUiAvailable(ctx)) {
+            try { ctx.ui.setStatus(NAVIGATOR_STATUS_KEY, undefined); } catch { /* ignore */ }
+            try { ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, undefined); } catch { /* ignore */ }
+        }
+        lastNavigatorHint = undefined;
         lastWidgetLines = undefined;
     });
 }
