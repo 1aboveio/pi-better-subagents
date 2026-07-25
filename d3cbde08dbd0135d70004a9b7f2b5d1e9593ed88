@@ -1,0 +1,1 @@
+fix queue failure on self-hosted Docker runners by installing GitHub CLI when absent
