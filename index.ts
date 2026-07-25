@@ -16,7 +16,8 @@ import { readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { spawnDetached, killProcessTree } from "./spawn.ts";
-import { parseRun, type Usage } from "./parse.ts";
+import { parseRun, tailLog, formatSubagentOutputBody, formatSubagentResultBody, type Usage } from "./parse.ts";
+
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { maybeBuildSandboxCommand } from "./sandbox.ts";
@@ -189,18 +190,6 @@ function resolvePiBinary(): string {
     return cachedPi;
 }
 
-/** Last `n` lines of a run's log, or a placeholder if empty/unreadable. */
-function tailLog(id: string, n: number): string {
-    let body: string;
-    try {
-        body = readFileSync(logPathFor(id), "utf-8");
-    } catch {
-        return "(no output yet)";
-    }
-    if (body.trim() === "") return "(no output yet)";
-    const lines = body.split("\n");
-    return lines.slice(Math.max(0, lines.length - n)).join("\n");
-}
 
 /**
  * Finalize a run once its child exits. Idempotent: a run already marked
@@ -483,8 +472,8 @@ export default function (pi: ExtensionAPI) {
             const spend = fmtSpend(r.usage);
             const head = `[${p.id} · ${st} · ${el}${spend ? ` · ${spend}` : ""}]`;
             const tools = r.toolCalls.length ? `\ntools used: ${r.toolCalls.join(", ")}` : "";
-            const body = r.finalText || r.lastActivity || "(no output yet)";
-            return text(`${head}${tools}\n${body}`);
+            const raw = tailLog(p.id, p.tail_lines ?? 40);
+            return text(formatSubagentOutputBody(head, tools, r.finalText || r.lastActivity || undefined, raw, r.diagnostics));
         },
     });
 
@@ -519,8 +508,13 @@ export default function (pi: ExtensionAPI) {
             // Clean final answer parsed from the JSON stream. Fall back to the raw
             // log tail only if parsing found nothing (e.g. a child that crashed
             // before emitting any assistant message).
-            const body = r.finalText || `(no final answer parsed)\n\n--- raw log tail ---\n${tailLog(p.id, 40)}`;
-            return text(`[${p.id} · ${st} · exit ${exit}${statSeg}${tools}]\n${body}`);
+            const rawTail = tailLog(p.id, 40);
+            return text(formatSubagentResultBody(
+                `[${p.id} · ${st} · exit ${exit}${statSeg}${tools}]`,
+                r.finalText || undefined,
+                rawTail,
+                r.diagnostics,
+            ));
         },
     });
 
