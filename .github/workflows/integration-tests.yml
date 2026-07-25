@@ -32,10 +32,10 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch'
       || startsWith(github.head_ref, 'mergify/merge-queue/')
-    # macOS until https://github.com/1aboveio/pi-better-subagents/issues/5
-    # (Linux sandbox). The queue suite itself (web_fetch + gh) does not need
-    # sandbox-exec, but staying on macOS keeps full run_all.sh available later.
-    runs-on: macos-latest
+    # This queue suite (web_fetch + gh) is Linux-compatible and does not need
+    # sandbox-exec. The broader sandbox-dependent suite remains blocked by
+    # https://github.com/1aboveio/pi-better-subagents/issues/5.
+    runs-on: [self-hosted, Linux, X64, docker]
     timeout-minutes: 30
     permissions:
       contents: read
@@ -47,6 +47,27 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Ensure GitHub CLI is installed
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            exit 0
+          fi
+          if ! command -v apt-get >/dev/null 2>&1; then
+            echo "::error::gh is missing and this runner has no apt-get"
+            exit 1
+          fi
+          elevate=()
+          if [ "$(id -u)" -ne 0 ]; then
+            if ! command -v sudo >/dev/null 2>&1; then
+              echo "::error::gh is missing and package installation requires sudo"
+              exit 1
+            fi
+            elevate=(sudo)
+          fi
+          "${elevate[@]}" apt-get update
+          "${elevate[@]}" apt-get install -y gh
 
       - name: Install pi CLI
         run: npm install -g @earendil-works/pi-coding-agent
