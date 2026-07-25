@@ -1,6 +1,6 @@
 {
   "unit": "#103",
-  "headNote": "content HEAD of multi-url class-complete fix; stamp commit may follow",
+  "headNote": "production multi-url class-complete fix HEAD (stamp commit follows)",
   "results": [
     {
       "surface": "git_remotes.read",
@@ -17,5 +17,5 @@
       "observed": "SMOKE PASS: multi-url/no-pushurl read+sync; push reached both urls; stale url+pushurl empty; model.urls.length=2"
     }
   ],
-  "headSha": "PENDING"
+  "headSha": "62b856e5457c8a116eed1eff926de2be2939d863"
 }
