@@ -137,9 +137,11 @@ Loading every installed package means inheriting their startup side effects. A
 package that replaces builtin `bash` with a `detached` + `unref()` spawn breaks
 `pi -p`: on a parallel `bash` + `read` batch the in-process `read` finishes, the
 unref'd `bash` doesn't hold the event loop, Node drains, and the child **exits 0
-mid-turn** — no `tool_execution_end`, no `agent_end`. Exit 0 is indistinguishable
-from a clean finish, so it is reported as completed. Across 30 recorded runs, 17
-died this way and every one was reported as ✓ completed.
+mid-turn** — no `tool_execution_end`, no `agent_end`. Historically, exit 0 was
+indistinguishable from a clean finish, so all 17 observed mid-turn exits were
+reported as ✓ completed. Finalization now requires terminal agent evidence and
+no unmatched tool starts; an incoherent exit is recorded as failed with an
+incomplete-stream diagnostic instead.
 
 A tool allowlist alone cannot fix this. `--tools` restricts what the model may
 *call*; the package already overrode builtin `bash` at startup, so the `bash` in

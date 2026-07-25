@@ -26,12 +26,13 @@
  */
 export function formatCallbackTrigger(p) {
     const tools = p.tools ? ` ·${p.tools.replace(/\n/, " ")}` : "";
-    return (
-        `A background subagent you launched has returned.\n` +
-        `subagent: ${p.label} · ${p.verdict} · ${p.stat}${tools}\n\n` +
-        `Ingest this signal and call subagent_result id="${p.id}" to retrieve the actual result, ` +
-        `then use/present it as appropriate.`
-    );
+    const announcement = p.incomplete
+        ? "A background subagent exited unexpectedly before producing a coherent final result."
+        : "A background subagent you launched has returned.";
+    const instruction = p.incomplete
+        ? `Inspect the diagnostic with subagent_result id="${p.id}" before deciding how to continue.`
+        : `Ingest this signal and call subagent_result id="${p.id}" to retrieve the actual result, then use/present it as appropriate.`;
+    return `${announcement}\nsubagent: ${p.label} · ${p.verdict} · ${p.stat}${tools}\n\n${instruction}`;
 }
 
 /**
@@ -48,6 +49,10 @@ export function formatCallbackTrigger(p) {
  * @param p.stat - Statistics line
  */
 export function formatCallbackQuiet(p) {
+    if (p.incomplete) {
+        return `Background subagent ${p.label} ended unexpectedly · ${p.verdict} · ${p.stat}. ` +
+            `Diagnostic NOT auto-posted (callback:false). Inspect it with subagent_result id="${p.id}".`;
+    }
     return (
         `Background subagent ${p.label} ${p.verdict} · ${p.stat}. ` +
         `Result NOT auto-posted (callback:false). ` +
@@ -80,6 +85,7 @@ export function buildCompletionDelivery(p) {
                 verdict: p.verdict,
                 stat: p.stat,
                 tools: p.tools,
+                incomplete: p.incomplete,
             }),
             options: { deliverAs: "followUp", triggerTurn: true },
         };
@@ -90,6 +96,7 @@ export function buildCompletionDelivery(p) {
             label: p.label,
             verdict: p.verdict,
             stat: p.stat,
+            incomplete: p.incomplete,
         }),
         options: { deliverAs: "nextTurn" },
     };

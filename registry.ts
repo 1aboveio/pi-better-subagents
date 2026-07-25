@@ -30,6 +30,8 @@ export interface RunMeta {
     startedAt: number;
     endedAt?: number;
     exitCode?: number | null;
+    /** Why an otherwise-zero exit is recorded as a non-success. */
+    failureReason?: "incomplete-stream";
     logPath: string;
     sessionId: string;
     /** Writable dir the child is OS-sandboxed to, if any. */
