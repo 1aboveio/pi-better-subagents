@@ -35,6 +35,6 @@ Out of scope: redesign of #44–#47 semantics; new slash commands; model-facing 
 |-------|-----|-------|-------|
 | S1 narrow list/detail | pass (char) | pass | list+detail post style-strip; existing #45/#46 pins retained |
 | S2 selection stability/clamp | pass (applyNavigatorRows missing) | pass | `applyNavigatorRows` + overlay `refreshRows` keep-by-id |
-| S3 footer/timers/reload/wrappers | pass (session_start missing dispose) | pass | session_start dispose + confirm clear; editor dedupe char |
+| S3 footer/timers/reload/wrappers | pass (session_start missing dispose) | pass | session_start dispose + confirm clear; editor dedupe char; registered reload path in navigator_reload_extension_path.test.mjs (behavior, not source scan) |
 | S4 widget + non-TUI | pass (char) | pass | widget.mjs isolation + isNavigatorUiAvailable + widget_flicker suite |
 | S5 docs | pass (README missing) | pass | README Subagent navigator section + docs pin test |

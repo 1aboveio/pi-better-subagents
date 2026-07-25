@@ -5,9 +5,10 @@
  * applyNavigatorRows selection stability; list/detail narrow truncation after
  * style strip; overlay dismiss clamp; editor install reload dedupe; tracked
  * dispose clearing detail + close-arm timers; footer count/confirm clear;
- * session_start source pins for reload cleanup; TUI guard; index/navigator
- * strip-types parse. Pi UI/timer/clock are the external boundary (faked per
- * #43); everything on OUR side is shipping code.
+ * registered session_start reload path (real extension factory → open →
+ * detail+arm → second session_start); TUI guard; index/navigator strip-types
+ * parse. Pi UI/timer/clock are the external boundary (faked per #43);
+ * everything on OUR side is shipping code.
  *
  * Rerun:  node docs/tests/issue-48-runtime-smoke.mjs > docs/tests/issue-48-runtime-smoke.json
  */
@@ -343,16 +344,16 @@ await record(
         check(calls.some((c) => c[0] === CLOSE_CONFIRM_STATUS_KEY && c[1] === undefined), "confirm cleared");
         check(calls.at(-1)[0] === NAVIGATOR_STATUS_KEY && calls.at(-1)[1] === undefined, "count cleared at 0");
 
-        // --- session_start reload pins in index.ts ---
+        // --- registered session_start reload path (behavior, not source scan) ---
+        // Loads real index.ts factory → session_start → empty-editor ← → detail +
+        // close-arm → second session_start; asserts timers/confirm clear, editor
+        // does not stack, footer republishes. Replaces source-token scanning.
         const indexPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../index.ts");
-        const src = readFileSync(indexPath, "utf8");
-        const startIdx = src.indexOf('pi.on("session_start"');
-        const shutIdx = src.indexOf('pi.on("session_shutdown"', startIdx);
-        const startBlock = src.slice(startIdx, shutIdx > startIdx ? shutIdx : startIdx + 1500);
-        check(startBlock.includes("disposeTrackedNavigator(navigatorDisposeSlot)"), "session_start disposes overlay");
-        check(startBlock.includes("CLOSE_CONFIRM_STATUS_KEY"), "session_start clears confirm");
-        check(startBlock.includes("installNavigator(ctx)"), "session_start reinstalls editor");
-        check(startBlock.includes("updateNavigatorFooter(ctx)"), "session_start republishes footer");
+        execFileSync(
+            process.execPath,
+            ["--test", path.join(path.dirname(fileURLToPath(import.meta.url)), "../../tests/navigator_reload_extension_path.test.mjs")],
+            { stdio: "pipe", cwd: path.join(path.dirname(fileURLToPath(import.meta.url)), "../..") },
+        );
 
         // --- TUI guard ---
         check(isNavigatorUiAvailable({ mode: "tui", hasUI: true, ui: {} }) === true, "tui ok");
@@ -370,7 +371,7 @@ await record(
         check(/two-press|x again/i.test(readme), "README documents two-press x");
         check(/dismiss/i.test(readme) && /subagent_list/i.test(readme), "README documents dismiss + tools");
 
-        return "applyNavigatorRows keep-by-id + clamp; list/detail narrow post style-strip; overlay dismiss clamp; editor reload dedupe; dispose clears detail+arm timers+confirm; footer count/confirm clear; session_start reload dispose/clear/republish; TUI guard; strip-types index+navigator; README controls";
+        return "applyNavigatorRows keep-by-id + clamp; list/detail narrow post style-strip; overlay dismiss clamp; editor reload dedupe; dispose clears detail+arm timers+confirm; footer count/confirm clear; registered session_start reload disposes timers+confirm, no editor stack, republishes footer; TUI guard; strip-types index+navigator; README controls";
     },
 );
 

@@ -546,32 +546,12 @@ describe("navigator hardening: footer / reload / timers", () => {
 
     // @covers navigator.hardening
     // @level unit
-    it("session_start reload path disposes tracked overlay and clears close-confirm status", () => {
-        // Source-level pin of the #48 reload hardening in index.ts: before
-        // reinstalling the editor / republishing the count footer, session_start
-        // must dispose any leftover overlay and clear CLOSE_CONFIRM_STATUS_KEY.
+    it("session_shutdown still clears footer keys and dispose slot under the TUI guard", () => {
+        // Behavior-driven reload proof lives in
+        // tests/navigator_reload_extension_path.test.mjs (registered factory →
+        // open → detail+arm → second session_start). This unit pin only keeps
+        // the shutdown teardown contract visible next to the other S3 pins.
         const src = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.ts"), "utf8");
-        const startIdx = src.indexOf('pi.on("session_start"');
-        assert.ok(startIdx >= 0, "session_start handler must exist");
-        const shutdownIdx = src.indexOf('pi.on("session_shutdown"', startIdx);
-        const block = src.slice(startIdx, shutdownIdx > startIdx ? shutdownIdx : startIdx + 1200);
-        assert.ok(
-            block.includes("disposeTrackedNavigator(navigatorDisposeSlot)"),
-            "session_start must dispose any tracked navigator overlay on reload",
-        );
-        assert.ok(
-            block.includes("CLOSE_CONFIRM_STATUS_KEY"),
-            "session_start must clear close-confirm footer status on reload",
-        );
-        assert.ok(
-            block.includes("installNavigator(ctx)"),
-            "session_start still installs the editor wrapper after cleanup",
-        );
-        assert.ok(
-            block.includes("updateNavigatorFooter(ctx)"),
-            "session_start republishes the count footer after reload",
-        );
-        // session_shutdown still clears both status keys under the TUI guard.
         const shut = src.slice(src.indexOf('pi.on("session_shutdown"'));
         assert.ok(shut.includes("isNavigatorUiAvailable(ctx)"));
         assert.ok(shut.includes("NAVIGATOR_STATUS_KEY"));
