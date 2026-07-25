@@ -33,6 +33,11 @@
   ],
   "bypass_actors": [
     {
+      "actor_id": null,
+      "actor_type": "OrganizationAdmin",
+      "bypass_mode": "always"
+    },
+    {
       "actor_id": 10562,
       "actor_type": "Integration",
       "bypass_mode": "always"
