@@ -16,7 +16,7 @@ cannot drift from what ships.
 | `linux_bubblewrap.integration.mjs` | Linux queue lane: real product-built bubblewrap children prove inside writes, outside and symlink denial, canonical aliases, outside reads, read-only `~/.pi`, host `/tmp`, `/dev/null`, and host-local HTTP. Missing `bwrap` fails this test. |
 | `test_web_fetch.sh` | An extension-provided tool (`web_fetch`) works in a scoped child: fetch the repo page, report a word count. |
 | `test_gh_issues.sh` | A `bash`-scoped child can drive an external CLI: `gh issue list` against this repo. |
-| `test_env_inherit.sh` | The foreground environment (e.g. `GH_TOKEN`) reaches the subagent **through the OS sandbox** — credential passing. |
+| `test_env_inherit.sh` | The foreground environment (e.g. `GH_TOKEN`) reaches the subagent **through the OS sandbox**, and the child returns the exact inherited marker — credential passing. |
 | `test_headless_isolation.sh` | A child survives a parallel `bash` + `read` batch: every `tool_execution_start` has an end, a terminal agent event is reached, and `web_fetch` still works ([#17](https://github.com/1aboveio/pi-better-subagents/issues/17)). |
 | `extensions.test.mjs` | Unit: only packages backing a requested tool are loaded; nothing the model passes can widen the runtime. |
 
@@ -47,9 +47,11 @@ Two-step gate (see `.mergify.yml`):
 
 The Ubuntu queue lane first installs and probes `bwrap`, then runs
 `linux_bubblewrap.integration.mjs` as a required real-filesystem boundary test.
-It also runs the existing macOS sandbox scripts through `run_queue.sh`; those
-scripts retain their platform routing and macOS assertions. `test_env_inherit.sh`
-stays local-only (`run_all.sh`). Linux write-sandbox: [#5](https://github.com/1aboveio/pi-better-subagents/issues/5).
+It runs `test_env_inherit.sh`, `test_web_fetch.sh`, `test_gh_issues.sh`, and
+`test_headless_isolation.sh` through the selected Linux sandbox command. The
+PR gate's `macos-sandbox` job runs the existing deterministic macOS
+`sandbox-exec` scripts with their unchanged assertions. Linux write-sandbox:
+[#5](https://github.com/1aboveio/pi-better-subagents/issues/5).
 
 ## What to expect
 

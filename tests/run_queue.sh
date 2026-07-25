@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
 # Merge-queue integration suite — the expensive pre-merge gate.
 #
-# Runs the merge-queue gate tests:
-#   1. macOS write-sandbox is applied (deterministic, no model)
-#   2. sandboxed child cannot write outside sandbox_dir (deterministic)
-#   3. extension tool web_fetch works in a scoped child
-#   4. bash-scoped child can drive gh headlessly via GH_TOKEN
-#   5. a child survives a parallel bash+read batch (#17 regression)
+# Runs the merge-queue's expensive real-child smoke tests through the selected
+# Linux bubblewrap backend:
+#   1. foreground environment reaches a sandboxed child exactly
+#   2. real model + extension-provided web_fetch works in a scoped child
+#   3. bash-scoped child can drive gh headlessly via GH_TOKEN
+#   4. a child survives a parallel bash+read batch (#17 regression)
 #
-# (5) is the reason this gate exists at all: the failure it guards is a child
+# (4) is the reason this gate exists at all: the failure it guards is a child
 # that exits 0 mid-turn and is reported as completed. Silent success is exactly
 # what a merge gate must not let back in, so it runs here, not just locally.
 #
 # The workflow runs the required Linux real-bwrap boundary test before this
-# script. test_env_inherit.sh stays local-only (run_all.sh) — env-through-sandbox
-# is covered there; this script retains the existing macOS platform-routed
-# assertions plus the network/gh smokes.
+# script. Deterministic macOS sandbox-exec checks run separately in the PR gate;
+# this queue suite keeps only the expensive Linux real-child smokes.
 #
 # Usage:
 #   tests/run_queue.sh
@@ -28,8 +27,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PI_SUBAGENT_TEST_MODEL="${PI_SUBAGENT_TEST_MODEL:-minimax-cn/MiniMax-M3}"
 
 tests=(
-    "$DIR/test_sandbox_applied.sh"
-    "$DIR/test_sandbox_deny_outside.sh"
+    "$DIR/test_env_inherit.sh"
     "$DIR/test_web_fetch.sh"
     "$DIR/test_gh_issues.sh"
     "$DIR/test_headless_isolation.sh"

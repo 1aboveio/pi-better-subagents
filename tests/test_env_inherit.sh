@@ -17,7 +17,7 @@ ID="test_env_$$"
 WORK="$RUNTIME/work_$$"
 # Sandboxed (writes confined to WORK) — proves env survives the sandbox wrapper.
 run_child "$ID" "read,bash" \
-    "Using the bash tool, run exactly: printenv PI_ENV_MARKER . Then report the value it printed on its own line, prefixed with SEEN=." \
+    "Using the bash tool, run exactly this command with no extra arguments:\nprintenv PI_ENV_MARKER\nThen put exactly one line in your final answer in this format: SEEN=<the exact value printed by the command>." \
     "$WORK"
 rc=$?
 
@@ -28,6 +28,12 @@ echo "  --- subagent answer ---"
 echo "$ans" | sed 's/^/    /' | head -8
 echo "  -----------------------"
 
-# The child must have printed back the exact marker value it inherited.
-assert_contains "subagent inherited the foreground env var (through the sandbox)" \
-    "$ans" "$PI_ENV_MARKER"
+# The child must return the exact marker on its own line, not a substring or
+# a fabricated value. This proves the foreground environment crossed the OS
+# sandbox boundary intact.
+seen="$(printf '%s\n' "$ans" | sed -n 's/^[[:space:]]*SEEN=//p' | head -n 1)"
+if [ "$seen" != "$PI_ENV_MARKER" ]; then
+    echo "  FAIL: expected exact sandboxed marker SEEN=$PI_ENV_MARKER, got $(printf %q "$seen")"
+    exit 1
+fi
+echo "  PASS: subagent inherited the exact foreground env var through the sandbox"

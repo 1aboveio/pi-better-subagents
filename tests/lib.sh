@@ -100,21 +100,45 @@ run_sandboxed_bash() {
     ( cd "$runcwd" && /usr/bin/sandbox-exec -f "$prof" /bin/bash -c "$script" )
 }
 
+# build_sandbox_command PROFILE WRITABLE_DIR PI_BIN PI_ARG...
+#   Emits the exact product-selected command and argv, one argument per line.
+#   Calling sandbox.ts directly keeps Linux bubblewrap test execution coupled to
+#   the same backend selection and wrapper construction that subagent_spawn uses.
+build_sandbox_command() {
+    local profile="$1" writable_dir="$2" pi_bin="$3"
+    shift 3
+    REPO_DIR="$REPO_DIR" node --experimental-strip-types --input-type=module -e '
+        import { join } from "node:path";
+        import { pathToFileURL } from "node:url";
+        const [profilePath, writableDir, home, piBin, ...piArgs] = process.argv.slice(1);
+        const { maybeBuildSandboxCommand } = await import(
+            pathToFileURL(join(process.env.REPO_DIR, "sandbox.ts")).href,
+        );
+        const command = maybeBuildSandboxCommand({
+            profilePath,
+            writableDir,
+            home,
+            piBin,
+            piArgs,
+        }, { sandboxEnabled: true, explicitSandbox: true });
+        if (!command) throw new Error("sandbox backend did not produce a wrapper command");
+        process.stdout.write([command.file, ...command.fileArgs].join("\n") + "\n");
+    ' "$profile" "$writable_dir" "$HOME" "$pi_bin" "$@"
+}
+
 # run_child ID TOOLS PROMPT [SANDBOX_DIR]
 #   Runs the child as the extension does and writes the JSON stream to
-#   $RUNTIME/runs/ID.log. With SANDBOX_DIR set, wraps in sandbox-exec confining
-#   writes to that dir (and runs there). Returns exit code (124 on timeout).
+#   $RUNTIME/runs/ID.log. With SANDBOX_DIR set, uses the product-selected OS
+#   sandbox command (sandbox-exec on macOS, bubblewrap on Linux) and runs in the
+#   confined directory. Returns exit code (124 on timeout).
 run_child() {
     local id="$1" tools="$2" prompt="$3" sbxdir="${4:-}"
     local log="$RUNTIME/runs/$id.log"
     mkdir -p "$RUNTIME/runs"
 
-    local -a pre=()
     local runcwd="$SESS"
     if [ -n "$sbxdir" ]; then
         mkdir -p "$sbxdir"
-        _write_sandbox_profile "$RUNTIME/runs/$id.sb" "$sbxdir"
-        pre=(/usr/bin/sandbox-exec -f "$RUNTIME/runs/$id.sb")
         runcwd="$sbxdir"
     fi
 
@@ -126,16 +150,37 @@ run_child() {
         REPO_DIR="$REPO_DIR" ext_args "$tools" "$CHILD_MODEL"
     )
 
+    local pi_bin
+    pi_bin="$(command -v pi)" || {
+        echo "  FAIL: pi CLI is unavailable" >&2
+        return 1
+    }
+    local -a pi_args=(
+        -p --mode json
+        --session-dir "$SESS" --session-id "$id"
+    )
+    pi_args+=("${ext[@]}")
+    pi_args+=(--model "$CHILD_MODEL" --tools "$tools" "$prompt")
+
+    local -a command=("$pi_bin" "${pi_args[@]}")
+    if [ -n "$sbxdir" ]; then
+        local wrapper="$RUNTIME/runs/$id.wrapper"
+        if ! build_sandbox_command "$RUNTIME/runs/$id.sb" "$sbxdir" "$pi_bin" "${pi_args[@]}" > "$wrapper"; then
+            echo "  FAIL: product sandbox command construction failed" >&2
+            return 1
+        fi
+        command=()
+        while IFS= read -r arg; do command+=("$arg"); done < "$wrapper"
+        if [ "${#command[@]}" -eq 0 ]; then
+            echo "  FAIL: product sandbox command was empty" >&2
+            return 1
+        fi
+    fi
+
     # A portable timeout wrapper (macOS has no `timeout`): background + watchdog.
     # stdin MUST be closed (< /dev/null): `--mode json` otherwise waits on stdin
     # forever. The extension spawns children with stdin "ignore" for this reason.
-    # ${pre[@]+...} guards the empty-array case under `set -u` on bash 3.2 (macOS).
-    ( cd "$runcwd" && ${pre[@]+"${pre[@]}"} pi -p --mode json \
-        --session-dir "$SESS" --session-id "$id" \
-        ${ext[@]+"${ext[@]}"} \
-        --model "$CHILD_MODEL" \
-        --tools "$tools" \
-        "$prompt" < /dev/null ) > "$log" 2>&1 &
+    ( cd "$runcwd" && "${command[@]}" < /dev/null ) > "$log" 2>&1 &
     local pid=$!
     local waited=0
     while kill -0 "$pid" 2>/dev/null; do
