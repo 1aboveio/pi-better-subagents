@@ -1,0 +1,1 @@
+fix round 4 (class-complete): git-remote-preservation via structured git config --null (whitespace URLs, multi-remote, fetch-only, distinct pushurl, stale removal); batch-clone-option-forwarding through mergeJobOptions shared+per-job
