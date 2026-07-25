@@ -39,6 +39,7 @@ import {
     canExitFinalize,
     navigatorVisibleRuns,
     navigatorVisibleCount,
+    dismissRun,
     type RunMeta,
 } from "./registry.ts";
 import {
@@ -81,8 +82,11 @@ import {
 } from "./widget.ts";
 import {
     NAVIGATOR_STATUS_KEY,
+    CLOSE_CONFIRM_STATUS_KEY,
     navigatorFooterHint,
     applyNavigatorFooter,
+    applyCloseConfirmFooter,
+    executeNavigatorClose,
     isNavigatorUiAvailable,
     buildNavigatorRows,
     buildNavigatorDetail,
@@ -283,6 +287,7 @@ export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void 
 
 // ---- minimal subagent navigator (empty-editor ←, #45) --------------------
 // ---- subagent navigator (empty-editor ← list #45, live detail #46) --------
+// ---- subagent navigator (list #45, detail #46, two-press close #47) -------
 //
 // Human-facing TUI surface, kept separate from the passive live widget (which
 // is untouched). Glue points, all gated on isNavigatorUiAvailable so print/RPC
@@ -294,8 +299,9 @@ export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void 
 //      editor (composition via navigator.mjs, tested with fakes);
 //   3. a focused overlay (ctx.ui.custom(..., { overlay: true })) listing the
 //      #44 navigatorVisibleRuns newest first, with Enter → live detail view
-//      that refreshes once per second (#46). Detail timers dispose on back,
-//      Escape, overlay close, and session_shutdown.
+//      that refreshes once per second (#46) and two-press `x` Close (#47).
+//      Detail + close-arm timers dispose on back, Escape, overlay close,
+//      selection change, list↔detail return, and session_shutdown.
 
 /** Last footer hint published (undefined ⇒ never set); dirty-check guard. */
 let lastNavigatorHint: string | null | undefined;
@@ -331,6 +337,24 @@ const navigatorDisposeSlot = {
     set: (fn: (() => void) | undefined) => { activeNavigatorDispose = fn; },
 };
 
+/** Shared #44 stop+dismiss path used by navigator Close (#47). */
+function navigatorCloseRun(id: string) {
+    return executeNavigatorClose(id, {
+        readMeta,
+        effectiveStatus,
+        stopRun,
+        dismissRun,
+    });
+}
+
+/** Publish/clear the Close confirmation footer hint (TUI only). */
+function publishCloseConfirmHint(ctx: ExtensionContext, hint: string | null): void {
+    if (!isNavigatorUiAvailable(ctx)) return;
+    try {
+        applyCloseConfirmFooter(ctx.ui, hint);
+    } catch { /* ignore */ }
+}
+
 /** Open the focused navigator overlay. No-op without a UI or visible runs. */
 function openNavigator(ctx: ExtensionContext): void {
     if (!isNavigatorUiAvailable(ctx)) return;
@@ -345,6 +369,15 @@ function openNavigator(ctx: ExtensionContext): void {
             truncate: truncateToWidth,
             getDetail: (id: string) => navigatorDetail(id),
             getRows: () => navigatorRows(),
+            closeRun: (id: string) => navigatorCloseRun(id),
+            onCloseConfirmHint: (hint: string | null) => publishCloseConfirmHint(ctx, hint),
+            onClosed: () => {
+                // Refresh footer count after a dismiss; force dirty-check miss.
+                lastNavigatorHint = undefined;
+                updateNavigatorFooter(ctx);
+                // A kill may have changed the live widget's set of running runs.
+                try { renderWidget(); } catch { /* ignore */ }
+            },
         }, navigatorDisposeSlot);
     } catch { /* never let UI glue break the session */ }
 }
@@ -834,6 +867,7 @@ export default function (pi: ExtensionAPI) {
         try { ctx.ui.setWidget("subagents", WIDGET_CLEAR); } catch { /* ignore */ }
         if (isNavigatorUiAvailable(ctx)) {
             try { ctx.ui.setStatus(NAVIGATOR_STATUS_KEY, undefined); } catch { /* ignore */ }
+            try { ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, undefined); } catch { /* ignore */ }
         }
         lastNavigatorHint = undefined;
         lastWidgetLines = undefined;
