@@ -203,7 +203,9 @@ await record(
 );
 
 // 4. index.ts (extension entry) — parses; navigator wiring present; no setFooter;
-//    registered extension RPC startup-through-shutdown emits no navigator setStatus.
+//    registered extension RPC startup-through-shutdown emits zero navigator UI
+//    calls for the full non-TUI isolation class (footer status + close-confirm
+//    status + editor install + overlay custom).
 await record(
     "index.ts (extension entry)",
     "node --experimental-strip-types --check index.ts && node docs/tests/issue-45-runtime-smoke.mjs (registered RPC path)",
@@ -213,15 +215,24 @@ await record(
             cwd: repoRoot,
             stdio: "pipe",
         });
-        // Live registered-path RPC probe: load the real extension factory
-        // in-process (host packages stubbed via pi_host_stub_hooks) and drive
-        // session_start → session_shutdown under an RPC-shaped ctx. At bc0d0f
-        // this emitted setStatus/subagents-nav on shutdown; the TUI-only guard
-        // must block it. No global `pi` binary required (CI has none on PATH).
-        // Widget setWidget remains allowed in RPC and is not asserted away.
+        // Invariant class: non-TUI navigator isolation.
+        // Adjacent members driven here (all must stay silent on registered RPC):
+        //   - footer status        (NAVIGATOR_STATUS_KEY / 'subagents-nav')
+        //   - close-confirm status ('subagents-close'; #47+ adjacent member)
+        //   - editor wrapper install
+        //   - overlay custom()
+        // Widget setWidget remains allowed in RPC (pi docs) and is not asserted away.
+        // Live registered-path RPC probe (not source-scan-only): load the real
+        // extension factory in-process (host packages stubbed via
+        // pi_host_stub_hooks) and drive session_start → session_shutdown under
+        // an RPC-shaped ctx. No global `pi` binary required (CI has none on PATH).
+        // Class-complete: assert the FULL setStatus log is empty so an unguarded
+        // setStatus('subagents-close', undefined) cannot green-pass a filter that
+        // only checks NAVIGATOR_STATUS_KEY.
         register(new URL("../../tests/pi_host_stub_hooks.mjs", import.meta.url));
         const { default: betterSubagents } = await import("../../index.ts");
 
+        const CLOSE_CONFIRM_STATUS_KEY = "subagents-close";
         const statusCalls = [];
         const editorCalls = [];
         const customCalls = [];
@@ -251,14 +262,23 @@ await record(
         await handlers.session_start({}, rpcCtx);
         await handlers.session_shutdown({}, rpcCtx);
 
-        const navStatus = statusCalls.filter(([key]) => key === NAVIGATOR_STATUS_KEY);
         check(
-            navStatus.length === 0,
-            `RPC startup-through-shutdown must not emit navigator setStatus; got ${JSON.stringify(navStatus)}`,
+            statusCalls.length === 0,
+            `RPC startup-through-shutdown must emit zero setStatus calls ` +
+                `(non-TUI navigator isolation: footer '${NAVIGATOR_STATUS_KEY}' + ` +
+                `close-confirm '${CLOSE_CONFIRM_STATUS_KEY}'); got ${JSON.stringify(statusCalls)}`,
+        );
+        check(
+            statusCalls.filter(([key]) => key === NAVIGATOR_STATUS_KEY).length === 0,
+            "RPC must not setStatus footer key (subagents-nav)",
+        );
+        check(
+            statusCalls.filter(([key]) => key === CLOSE_CONFIRM_STATUS_KEY).length === 0,
+            "RPC must not setStatus close-confirm key (subagents-close)",
         );
         check(editorCalls.length === 0, "RPC must not install navigator editor");
         check(customCalls.length === 0, "RPC must not open navigator overlay");
-        return "index.ts parses under node type-stripping; footer hint via setStatus seam only (no setFooter); installNavigator/updateNavigatorFooter wired into session_start + subagent_spawn; registered extension RPC startup-through-shutdown: 0 navigator setStatus (shutdown cleanup TUI-guarded; no global pi binary)";
+        return "index.ts parses under node type-stripping; footer hint via setStatus seam only (no setFooter); installNavigator/updateNavigatorFooter wired into session_start + subagent_spawn; registered extension RPC startup-through-shutdown: 0 setStatus (footer+close-confirm) / 0 editor / 0 overlay custom — non-TUI navigator isolation class complete; no global pi binary";
     },
 );
 

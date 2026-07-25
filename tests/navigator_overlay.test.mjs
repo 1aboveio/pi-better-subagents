@@ -237,17 +237,31 @@ describe("non-TUI guard", () => {
     });
 
     // @covers navigator.footer-hint
+    // @covers navigator.editor-wrapper
+    // @covers navigator.overlay
     // @level unit
-    it("registered extension RPC startup-through-shutdown emits no navigator setStatus", async () => {
-        // Live regression for the invariant class closed by Fix Round 2: at
-        // HEAD bc0d0f the session_shutdown handler called
-        // ctx.ui.setStatus('subagents-nav', undefined) unconditionally.
-        // Drive the REAL production registration path in-process (index.ts
-        // factory → registered session_start / session_shutdown) under an
-        // RPC-shaped ctx. Host packages are stubbed at the EXTERNAL boundary
-        // only (pi_host_stub_hooks); no global `pi` binary is required, so
-        // this stays green on CI runners without pi on PATH. Widget setWidget
-        // remains legitimate in RPC (pi docs) and is not asserted away.
+    it("registered extension RPC startup-through-shutdown emits no navigator UI calls", async () => {
+        // Invariant class: non-TUI navigator isolation.
+        // Adjacent members (all must stay silent on the registered RPC path):
+        //   - footer status          (NAVIGATOR_STATUS_KEY / 'subagents-nav')
+        //   - close-confirm status   ('subagents-close'; #47+ key)
+        //   - editor wrapper install (setEditorComponent)
+        //   - overlay custom()       (showNavigator / detail)
+        // Widget setWidget remains legitimate in RPC (pi docs) and is NOT
+        // part of this class.
+        //
+        // Live driveable proof (not source-scan-only): load the REAL production
+        // registration path in-process (index.ts factory → registered
+        // session_start / session_shutdown) under an RPC-shaped ctx. Host
+        // packages are stubbed at the EXTERNAL boundary only
+        // (pi_host_stub_hooks); no global `pi` binary is required, so this
+        // stays green on CI runners without pi on PATH.
+        //
+        // At bc0d0f, session_shutdown called setStatus('subagents-nav',
+        // undefined) unconditionally. Filtering statusCalls for only
+        // NAVIGATOR_STATUS_KEY would still green-pass an unguarded
+        // setStatus('subagents-close', undefined) — so the class proof asserts
+        // the full setStatus log is empty, and names both navigator keys.
         register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
         const { default: betterSubagents } = await import("../index.ts");
 
@@ -256,6 +270,13 @@ describe("non-TUI guard", () => {
         const customCalls = [];
         const widgetCalls = [];
         const handlers = {};
+
+        // Known navigator status keys in the isolation class. The close-confirm
+        // key is owned by #47 but is an adjacent member of THIS invariant — an
+        // unguarded clear of it on session_start/session_shutdown is the same
+        // non-TUI leak class as the footer key, whether or not this unit
+        // exports the constant yet.
+        const CLOSE_CONFIRM_STATUS_KEY = "subagents-close";
 
         const ui = {
             setStatus(key, text) { statusCalls.push([key, text]); },
@@ -284,11 +305,28 @@ describe("non-TUI guard", () => {
         await handlers.session_start({}, rpcCtx);
         await handlers.session_shutdown({}, rpcCtx);
 
-        const navStatus = statusCalls.filter(([key]) => key === NAVIGATOR_STATUS_KEY);
+        // Class-complete: the registered RPC path has no legitimate setStatus
+        // writes at all. Prefer the full log over a single-key filter so an
+        // unguarded close-confirm (or any future navigator status key) cannot
+        // slip past.
         assert.deepEqual(
-            navStatus,
+            statusCalls,
             [],
-            `RPC startup-through-shutdown must not emit navigator setStatus; got ${JSON.stringify(navStatus)}`,
+            `RPC startup-through-shutdown must emit zero setStatus calls ` +
+                `(non-TUI navigator isolation: footer '${NAVIGATOR_STATUS_KEY}' + ` +
+                `close-confirm '${CLOSE_CONFIRM_STATUS_KEY}'); got ${JSON.stringify(statusCalls)}`,
+        );
+        // Named adjacent status members — keeps the class members greppable
+        // even if a later edit reintroduces a filtered assertion shape.
+        assert.equal(
+            statusCalls.filter(([key]) => key === NAVIGATOR_STATUS_KEY).length,
+            0,
+            "RPC must not setStatus footer key (subagents-nav)",
+        );
+        assert.equal(
+            statusCalls.filter(([key]) => key === CLOSE_CONFIRM_STATUS_KEY).length,
+            0,
+            "RPC must not setStatus close-confirm key (subagents-close)",
         );
         assert.deepEqual(editorCalls, [], "RPC must not install navigator editor factory");
         assert.deepEqual(customCalls, [], "RPC must not open navigator overlay via custom()");
