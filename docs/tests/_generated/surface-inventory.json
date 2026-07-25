@@ -35,6 +35,27 @@
       "class": "read",
       "path": "widget.mjs",
       "reachable": true
+    },
+    {
+      "id": "sandbox.backend-selection",
+      "kind": "service",
+      "class": "read",
+      "path": "sandbox.ts",
+      "reachable": true
+    },
+    {
+      "id": "sandbox.command-wrapper",
+      "kind": "service",
+      "class": "read",
+      "path": "sandbox.ts",
+      "reachable": true
+    },
+    {
+      "id": "sandbox.spawn-policy",
+      "kind": "service",
+      "class": "read",
+      "path": "index.ts",
+      "reachable": true
     }
   ]
 }

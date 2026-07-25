@@ -1,5 +1,5 @@
 /**
- * OS-level write sandbox for subagent children (macOS `sandbox-exec`).
+ * OS-level write sandbox for subagent children.
  *
  * Kernel-enforced confinement: the child may READ anywhere and use the network
  * (so web_fetch and the model API keep working), but may only WRITE under a
@@ -7,35 +7,35 @@
  * cooperative guardrails layer (which pattern-matches tool inputs), this cannot
  * be evaded by a crafted bash command — the write syscall itself is denied.
  *
- * macOS only. `sandbox-exec` is deprecated by Apple but present and functional
- * on current macOS; on other platforms callers must not request a sandbox.
+ * Backends are selected here so callers retain a platform-neutral support query
+ * and command-wrapper contract. Linux support adds a backend without changing
+ * the detached spawning policy in the extension.
  */
 
 import { platform } from "node:os";
 import { realpathSync, writeFileSync } from "node:fs";
 
-/** True when an OS write-sandbox can be applied on this platform. */
-export function sandboxSupported(): boolean {
-    return platform() === "darwin";
-}
+type SandboxCommandArgs = {
+    profilePath: string;
+    writableDir: string;
+    home: string;
+    piBin: string;
+    piArgs: string[];
+};
+
+type SandboxCommand = { file: string; fileArgs: string[] };
+
+type SandboxBackend = {
+    buildCommand(args: SandboxCommandArgs): SandboxCommand;
+};
 
 /** Quote a path as an SBPL string literal. */
 function sbpl(path: string): string {
     return `"${path.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-/**
- * Write a sandbox-exec profile confining writes to `writableDir` (+ the system
- * paths pi needs) to `profilePath`. Returns the argv to exec the sandbox, given
- * the pi binary and its args: `[sandbox-exec, -f, profile, pi, ...args]`.
- */
-export function buildSandboxCommand(args: {
-    profilePath: string;
-    writableDir: string;
-    home: string;
-    piBin: string;
-    piArgs: string[];
-}): { file: string; fileArgs: string[] } {
+/** Build the existing macOS sandbox-exec wrapper and SBPL profile. */
+function buildMacOSSandboxCommand(args: SandboxCommandArgs): SandboxCommand {
     // Match on the real (symlink-resolved) path — sandbox-exec evaluates the
     // canonical path, so /tmp/x must be written as /private/tmp/x.
     let dir = args.writableDir;
@@ -58,4 +58,28 @@ export function buildSandboxCommand(args: {
         file: "/usr/bin/sandbox-exec",
         fileArgs: ["-f", args.profilePath, args.piBin, ...args.piArgs],
     };
+}
+
+const macOSSandboxBackend: SandboxBackend = {
+    buildCommand: buildMacOSSandboxCommand,
+};
+
+function selectedSandboxBackend(): SandboxBackend | undefined {
+    if (platform() === "darwin") return macOSSandboxBackend;
+    return undefined;
+}
+
+/** True when an OS write-sandbox backend can be applied on this platform. */
+export function sandboxSupported(): boolean {
+    return selectedSandboxBackend() !== undefined;
+}
+
+/**
+ * Return the selected backend's executable and ordered argv wrapper around pi.
+ * Callers first use sandboxSupported() to preserve the unsupported-platform
+ * default-degrade and explicit-request policy. The fallback preserves the
+ * pre-existing direct-call result for callers that do not perform that check.
+ */
+export function buildSandboxCommand(args: SandboxCommandArgs): SandboxCommand {
+    return (selectedSandboxBackend() ?? macOSSandboxBackend).buildCommand(args);
 }
