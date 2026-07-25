@@ -26,6 +26,8 @@ import {
     buildNavigatorDetail,
     buildNavigatorRows,
     showNavigator,
+    openTrackedNavigator,
+    disposeTrackedNavigator,
     DETAIL_TICK_MS,
     isNavigatorUiAvailable,
 } from "../../navigator.ts";
@@ -170,26 +172,32 @@ await record(
         );
         check(rows.length === 2 && rows[0].id === runId, "newest-first rows");
 
-        // Live overlay with injected timers.
+        // Live overlay with injected timers. Pi-compatible custom(): the promise
+        // resolves to done(null), never the component — capture via onComponent.
         const timers = fakeTimers();
         let phase = "running";
         let renders = 0;
         const doneCalls = [];
         let customOptions;
+        let component;
         const ui = {
             custom(factory, options) {
                 customOptions = options;
-                const c = factory(
-                    { requestRender: () => renders++ },
-                    { fg: (_c, s) => s },
-                    {},
-                    (v) => doneCalls.push(v),
-                );
-                return Promise.resolve(c);
+                return new Promise((resolve) => {
+                    factory(
+                        { requestRender: () => renders++ },
+                        { fg: (_c, s) => s },
+                        {},
+                        (v) => {
+                            doneCalls.push(v);
+                            resolve(v);
+                        },
+                    );
+                });
             },
         };
         const matchKey = (d, id) => d === `<${id}>`;
-        const component = await showNavigator(ui, rows, {
+        const opened = showNavigator(ui, rows, {
             matchKey,
             truncate: (s, w) => (s.length > w ? s.slice(0, w) : s),
             getDetail: (id) => {
@@ -220,8 +228,10 @@ await record(
             setInterval: timers.setInterval,
             clearInterval: timers.clearInterval,
             tickMs: DETAIL_TICK_MS,
+            onComponent: (c) => { component = c; },
         });
         check(customOptions && customOptions.overlay === true, "must open focused overlay");
+        check(component && typeof component.handleInput === "function", "onComponent captures component sync");
 
         // Select first row (runId) and open detail.
         component.handleInput("<enter>");
@@ -262,6 +272,8 @@ await record(
         component.handleInput("<escape>");
         check(doneCalls.length === 1 && doneCalls[0] === null, "escape closes");
         check(timers.activeCount() === 0, "escape disposes timer");
+        const resolved = await opened;
+        check(resolved === null, "custom() resolves to done(null), not component");
 
         // dispose is idempotent after close.
         if (typeof component.dispose === "function") component.dispose();
@@ -271,15 +283,16 @@ await record(
         check(isNavigatorUiAvailable({ mode: "rpc", hasUI: true, ui: {} }) === false, "rpc blocked");
         check(isNavigatorUiAvailable({ mode: "tui", hasUI: true, ui: {} }) === true, "tui allowed");
 
-        return "real registry+parse detail fields; Enter→detail 1s timer; running→terminal on tick; ← back keeps selection + disposes; Escape closes + disposes; narrow width ok; dispose idempotent; TUI guard intact";
+        return "real registry+parse detail fields; Enter→detail 1s timer; running→terminal on tick; ← back keeps selection + disposes; Escape closes + disposes; Pi custom()→done(null); narrow width ok; dispose idempotent; TUI guard intact";
     },
 );
 
-// 2. index.ts — parses; detail wiring present (getDetail/dispose); no setFooter.
+// 2. index.ts — parses; openTrackedNavigator/disposeTrackedNavigator wired;
+//    behavioral proof: Pi-compatible custom() + session_shutdown clears timers.
 await record(
     "index.ts (extension entry)",
-    "node --experimental-strip-types --check index.ts",
-    () => {
+    "node --experimental-strip-types --check index.ts + openTrackedNavigator session_shutdown path",
+    async () => {
         const repoRoot = path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
         execFileSync(process.execPath, ["--experimental-strip-types", "--check", "index.ts"], {
             cwd: repoRoot,
@@ -290,17 +303,78 @@ await record(
             encoding: "utf8",
         });
         check(src.includes("buildNavigatorDetail") || src.includes("navigatorDetail"), "detail builder wired");
-        check(src.includes("getDetail"), "getDetail injected into showNavigator");
-        check(src.includes("activeNavigatorDispose") || src.includes(".dispose"), "dispose tracked for teardown");
+        check(src.includes("getDetail"), "getDetail injected into openTrackedNavigator");
+        check(src.includes("openTrackedNavigator"), "openTrackedNavigator used (sync dispose capture)");
+        check(src.includes("disposeTrackedNavigator"), "disposeTrackedNavigator used on session_shutdown");
         check(!src.includes("setFooter"), "must not replace the full footer");
         const shutdownIdx = src.indexOf('pi.on("session_shutdown"');
         check(shutdownIdx >= 0, "session_shutdown exists");
         const shutdownBody = src.slice(shutdownIdx, src.indexOf("});", shutdownIdx) + 3);
         check(
-            shutdownBody.includes("activeNavigatorDispose") || shutdownBody.includes("dispose"),
-            "session_shutdown must dispose navigator detail timers",
+            shutdownBody.includes("disposeTrackedNavigator"),
+            "session_shutdown must call disposeTrackedNavigator",
         );
-        return "index.ts parses; getDetail + dispose wired; session_shutdown disposes detail timers; no setFooter";
+
+        // Behavioral teardown proof (not source-scan): enter detail under Pi
+        // custom() semantics (promise → done(null)), then invoke the same
+        // disposeTrackedNavigator path index.ts uses on session_shutdown.
+        const timers = fakeTimers();
+        let component;
+        let activeDispose;
+        const disposeSlot = {
+            get: () => activeDispose,
+            set: (fn) => { activeDispose = fn; },
+        };
+        const ui = {
+            custom(factory, options) {
+                check(options && options.overlay === true, "overlay:true");
+                return new Promise((resolve) => {
+                    factory(
+                        { requestRender() {} },
+                        { fg: (_c, s) => s },
+                        {},
+                        (v) => resolve(v),
+                    );
+                });
+            },
+        };
+        const opened = openTrackedNavigator(
+            ui,
+            [{ id: "sa_shut", name: "shutdown-run", status: "running", model: "m", elapsed: "1s", spend: "" }],
+            {
+                matchKey: (d, id) => d === `<${id}>`,
+                truncate: (s, w) => (s.length > w ? s.slice(0, w) : s),
+                getDetail: () => ({
+                    id: "sa_shut",
+                    name: "shutdown-run",
+                    status: "running",
+                    model: "m",
+                    elapsed: "1s",
+                    tools: "",
+                    spend: "",
+                    output: "still open",
+                }),
+                setInterval: timers.setInterval,
+                clearInterval: timers.clearInterval,
+                tickMs: DETAIL_TICK_MS,
+                onComponent: (c) => { component = c; },
+            },
+            disposeSlot,
+        );
+        check(typeof activeDispose === "function", "dispose tracked sync under Pi custom()");
+        component.handleInput("<enter>");
+        check(timers.activeCount() === 1, "detail timer active before shutdown");
+        // session_shutdown equivalent (index.ts calls disposeTrackedNavigator).
+        disposeTrackedNavigator(disposeSlot);
+        check(timers.activeCount() === 0, "session_shutdown leaves zero detail timers");
+        check(activeDispose === undefined, "dispose slot cleared");
+        // Overlay may still be "open" from the host's view; escape is safe.
+        component.handleInput("<escape>");
+        const resolved = await opened;
+        check(resolved === null, "custom() settled with done(null)");
+        check(timers.activeCount() === 0, "no orphan after late close");
+
+        return "index.ts parses; openTrackedNavigator + disposeTrackedNavigator wired; session_shutdown path clears active detail timer under Pi custom()→done(null) semantics; no setFooter";
     },
 );
 

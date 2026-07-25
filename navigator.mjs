@@ -396,9 +396,75 @@ export function createNavigatorOverlayFactory(rows, deps) {
 /**
  * Open the navigator as a focused overlay. `ui.custom(factory, { overlay: true })`
  * makes pi render it on top of existing content and focus it on show.
+ *
+ * Pi's `custom()` resolves with the value passed to `done()` (typically `null`),
+ * NOT the component instance. Callers that need the component (e.g. to capture
+ * `dispose` for session_shutdown) must use `deps.onComponent`, which is invoked
+ * synchronously inside the factory when pi constructs the overlay.
+ *
+ * @param {object} ui
+ * @param {Array<object>} rows
+ * @param {object} [deps]
+ * @param {(component: object) => void} [deps.onComponent] - sync capture seam
  */
-export function showNavigator(ui, rows, deps) {
-    return ui.custom(createNavigatorOverlayFactory(rows, deps), { overlay: true });
+export function showNavigator(ui, rows, deps = {}) {
+    const baseFactory = createNavigatorOverlayFactory(rows, deps);
+    return ui.custom((tui, theme, keybindings, done) => {
+        const component = baseFactory(tui, theme, keybindings, done);
+        if (typeof deps.onComponent === "function") {
+            try { deps.onComponent(component); } catch { /* never break overlay open */ }
+        }
+        return component;
+    }, { overlay: true });
+}
+
+/**
+ * Open the navigator and track its dispose hook for session teardown.
+ *
+ * Pi's `ui.custom()` promise resolves to `done()`'s value (`null`), not the
+ * component — so dispose MUST be captured synchronously via `onComponent`.
+ * The active dispose reference is cleared when the overlay promise settles
+ * (normal close) and is safe to invoke from session_shutdown while open.
+ *
+ * @param {object} ui - pi UI with `custom()`
+ * @param {Array<object>} rows
+ * @param {object} deps - showNavigator deps (matchKey, truncate, getDetail, …)
+ * @param {{ get: () => (undefined|(() => void)), set: (fn: undefined|(() => void)) => void }} disposeSlot
+ * @returns {Promise<unknown>} pi custom() promise (resolves to done value)
+ */
+export function openTrackedNavigator(ui, rows, deps, disposeSlot) {
+    // Drop any prior overlay's timers before opening a new one (defensive;
+    // pi normally only allows one focused custom overlay at a time).
+    try { disposeSlot.get()?.(); } catch { /* ignore */ }
+    disposeSlot.set(undefined);
+
+    let disposeToken;
+    const opened = showNavigator(ui, rows, {
+        ...deps,
+        onComponent: (component) => {
+            if (typeof deps?.onComponent === "function") {
+                try { deps.onComponent(component); } catch { /* ignore */ }
+            }
+            if (component && typeof component.dispose === "function") {
+                disposeToken = () => {
+                    try { component.dispose(); } catch { /* ignore */ }
+                };
+                disposeSlot.set(disposeToken);
+            }
+        },
+    });
+    void Promise.resolve(opened).finally(() => {
+        if (disposeSlot.get() === disposeToken) {
+            disposeSlot.set(undefined);
+        }
+    });
+    return opened;
+}
+
+/** Invoke and clear a tracked navigator dispose slot (session_shutdown path). */
+export function disposeTrackedNavigator(disposeSlot) {
+    try { disposeSlot.get()?.(); } catch { /* ignore */ }
+    disposeSlot.set(undefined);
 }
 
 // ---------------------------------------------------------------------------

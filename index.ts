@@ -87,7 +87,8 @@ import {
     buildNavigatorRows,
     buildNavigatorDetail,
     installNavigatorEditor,
-    showNavigator,
+    openTrackedNavigator,
+    disposeTrackedNavigator,
 } from "./navigator.ts";
 
 /** The tools this extension registers — excluded from children by default so a
@@ -324,31 +325,27 @@ function navigatorDetail(id: string) {
     });
 }
 
+/** Mutable slot holding the active overlay's dispose hook. */
+const navigatorDisposeSlot = {
+    get: () => activeNavigatorDispose,
+    set: (fn: (() => void) | undefined) => { activeNavigatorDispose = fn; },
+};
+
 /** Open the focused navigator overlay. No-op without a UI or visible runs. */
 function openNavigator(ctx: ExtensionContext): void {
     if (!isNavigatorUiAvailable(ctx)) return;
     const rows = navigatorRows();
     if (rows.length === 0) return;
     try {
-        // Drop any prior overlay's timers before opening a new one (defensive;
-        // pi normally only allows one focused custom overlay at a time).
-        try { activeNavigatorDispose?.(); } catch { /* ignore */ }
-        activeNavigatorDispose = undefined;
-        const opened = showNavigator(ctx.ui, rows, {
+        // Pi's ui.custom() resolves with done()'s value (null), NOT the component.
+        // openTrackedNavigator captures dispose synchronously via onComponent
+        // and clears the slot when the overlay promise settles.
+        openTrackedNavigator(ctx.ui, rows, {
             matchKey: matchesKey,
             truncate: truncateToWidth,
             getDetail: (id: string) => navigatorDetail(id),
             getRows: () => navigatorRows(),
-        });
-        // Capture dispose from the resolved component so session_shutdown can
-        // clear a still-open detail timer without racing the close path.
-        void Promise.resolve(opened).then((component: any) => {
-            if (component && typeof component.dispose === "function") {
-                activeNavigatorDispose = () => {
-                    try { component.dispose(); } catch { /* ignore */ }
-                };
-            }
-        }).catch(() => { /* ignore */ });
+        }, navigatorDisposeSlot);
     } catch { /* never let UI glue break the session */ }
 }
 
@@ -829,8 +826,7 @@ export default function (pi: ExtensionAPI) {
         spendCache.clear();
         // Always dispose navigator detail timers (no UI call — just clearInterval).
         // Safe in every mode; the dispose hook is only set when a TUI overlay opened.
-        try { activeNavigatorDispose?.(); } catch { /* ignore */ }
-        activeNavigatorDispose = undefined;
+        disposeTrackedNavigator(navigatorDisposeSlot);
         // Widget clear is intentional in every mode that exposes ui (incl. RPC
         // — pi docs: setWidget works in both TUI and RPC). Navigator cleanup
         // is TUI-only: the footer hint is never published outside TUI, so

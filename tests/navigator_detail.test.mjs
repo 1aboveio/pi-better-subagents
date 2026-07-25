@@ -30,6 +30,8 @@ import {
     buildDetailLines,
     createNavigatorOverlayComponent,
     showNavigator,
+    openTrackedNavigator,
+    disposeTrackedNavigator,
     DETAIL_TICK_MS,
 } from "../navigator.ts";
 import { fmtElapsed, shortModel, fmtSpend } from "../widget.ts";
@@ -242,12 +244,21 @@ describe("navigator detail view", () => {
             return details[id] ?? detailFrom({ id, name: id });
         });
         const getRows = opts.getRows;
+        // Pi-compatible custom(): resolves to done()'s value (null), NOT the component.
         const ui = {
             custom(factory, options) {
                 customCalls.push(options);
-                const component = factory(tui, theme, {}, (v) => doneCalls.push(v));
-                return Promise.resolve(component);
+                return new Promise((resolve) => {
+                    const component = factory(tui, theme, {}, (v) => {
+                        doneCalls.push(v);
+                        resolve(v);
+                    });
+                    // Capture component via the factory return (local only).
+                    // Production callers must use onComponent — see openTrackedNavigator tests.
+                    ui._lastComponent = component;
+                });
             },
+            _lastComponent: undefined,
         };
         const matchKey = (data, id) => data === `<${id}>`;
         const deps = {
@@ -261,14 +272,18 @@ describe("navigator detail view", () => {
         };
         let component;
         // Prefer the component constructor for dispose access; showNavigator is
-        // the production entry and is also exercised below.
+        // the production entry and is also exercised below. Component is captured
+        // via onComponent (Pi-faithful) — never from the custom() promise.
         if (opts.viaShow !== false) {
-            showNavigator(ui, rows, deps).then((c) => { component = c; });
+            showNavigator(ui, rows, {
+                ...deps,
+                onComponent: (c) => { component = c; },
+            });
         } else {
             component = createNavigatorOverlayComponent(rows, deps, tui, theme, (v) => doneCalls.push(v));
         }
         return {
-            tui, doneCalls, customCalls, timers, deps,
+            tui, doneCalls, customCalls, timers, deps, ui,
             component: () => component,
             press: (d) => component.handleInput(d),
             lines: (w = 80) => plain(component.render(w)),
@@ -539,5 +554,114 @@ describe("navigator detail view", () => {
         assert.equal(o.timers.activeCount(), 0);
         assert.equal(o.doneCalls.length, 0);
         assert.ok(o.lines().some((l) => l.includes("no visible")));
+    });
+
+    // @covers navigator.detail
+    // @level unit
+    it("custom() resolving to done(null) still tracks dispose for session_shutdown", async () => {
+        // Contract: Pi's ui.custom(factory) returns a Promise that resolves to
+        // the value passed to done() (null), NOT the component. Index glue must
+        // capture dispose synchronously via onComponent so session_shutdown can
+        // clear a still-open detail timer. This is the regression for the
+        // navigator.detail.timer-lifecycle finding (PR #96 round 1).
+        const timers = fakeTimers();
+        const tui = { renders: 0, requestRender() { this.renders++; } };
+        const theme = { fg: (_c, s) => s };
+        let componentFromPromise;
+        const ui = {
+            custom(factory, options) {
+                assert.equal(options?.overlay, true);
+                return new Promise((resolve) => {
+                    // Construct component; done(null) resolves the promise with null.
+                    factory(tui, theme, {}, (v) => {
+                        resolve(v);
+                    });
+                });
+            },
+        };
+        let activeDispose;
+        const disposeSlot = {
+            get: () => activeDispose,
+            set: (fn) => { activeDispose = fn; },
+        };
+        let captured;
+        const opened = openTrackedNavigator(
+            ui,
+            [{ id: "sa_1", name: "r", status: "running", model: "m", elapsed: "1s", spend: "" }],
+            {
+                matchKey: (d, id) => d === `<${id}>`,
+                truncate,
+                getDetail: () => detailFrom({ id: "sa_1", status: "running", output: "live" }),
+                setInterval: timers.setInterval,
+                clearInterval: timers.clearInterval,
+                tickMs: DETAIL_TICK_MS,
+                onComponent: (c) => { captured = c; },
+            },
+            disposeSlot,
+        );
+
+        // Synchronous capture: dispose is tracked while overlay is still open.
+        assert.ok(captured && typeof captured.dispose === "function", "onComponent must capture component sync");
+        assert.equal(typeof activeDispose, "function", "dispose slot set before custom() settles");
+
+        // Enter detail → timer active.
+        captured.handleInput("<enter>");
+        assert.equal(timers.activeCount(), 1, "detail timer active while open");
+
+        // Prove the custom() promise does NOT yield the component (Pi semantics).
+        // We race a microtask tick without calling done — promise still pending.
+        let settled = false;
+        void opened.then((v) => {
+            settled = true;
+            componentFromPromise = v;
+        });
+        await Promise.resolve();
+        assert.equal(settled, false, "custom() must not resolve until done()");
+
+        // session_shutdown path while detail is open: must clear the timer.
+        disposeTrackedNavigator(disposeSlot);
+        assert.equal(timers.activeCount(), 0, "session_shutdown clears detail timer");
+        assert.equal(activeDispose, undefined, "dispose slot cleared after shutdown");
+
+        // Host later closes the overlay (done(null)) — safe, no timer resurrect.
+        captured.handleInput("<escape>");
+        await opened;
+        assert.equal(settled, true);
+        assert.equal(componentFromPromise, null, "custom() resolves to done(null), not component");
+        assert.equal(timers.activeCount(), 0, "no orphan timer after close");
+    });
+
+    // @covers navigator.detail
+    // @level unit
+    it("awaiting showNavigator under Pi custom() semantics yields null, not a component", async () => {
+        // Documents the Pi contract that hid the original bug in test fakes.
+        const ui = {
+            custom(factory) {
+                return new Promise((resolve) => {
+                    factory(
+                        { requestRender() {} },
+                        { fg: (_c, s) => s },
+                        {},
+                        (v) => resolve(v),
+                    );
+                });
+            },
+        };
+        let captured;
+        const p = showNavigator(
+            ui,
+            [{ id: "sa_1", name: "r", status: "completed", model: "m", elapsed: "1s", spend: "" }],
+            {
+                matchKey: (d, id) => d === `<${id}>`,
+                truncate,
+                onComponent: (c) => { captured = c; },
+            },
+        );
+        assert.ok(captured, "onComponent fires sync during factory");
+        // Close via Escape so the promise settles with null.
+        captured.handleInput("<escape>");
+        const resolved = await p;
+        assert.equal(resolved, null, "must not treat custom() resolution as the component");
+        assert.notEqual(resolved, captured);
     });
 });

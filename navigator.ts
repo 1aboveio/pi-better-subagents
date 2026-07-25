@@ -19,6 +19,8 @@ export {
     createNavigatorOverlayComponent,
     createNavigatorOverlayFactory,
     showNavigator,
+    openTrackedNavigator,
+    disposeTrackedNavigator,
     wrapEditor,
     NAVIGATOR_FACTORY_MARK,
     installNavigatorEditor,

@@ -595,16 +595,27 @@ describe("navigator overlay component", () => {
         const theme = { fg: (c, s) => `<${c}>${s}</>` };
         const doneCalls = [];
         const customCalls = [];
+        // Pi-compatible custom(): resolves to done()'s value (null), not component.
         const ui = {
             custom(factory, options) {
                 customCalls.push(options);
-                const component = factory(tui, theme, {}, (v) => doneCalls.push(v));
-                return Promise.resolve(component);
+                return new Promise((resolve) => {
+                    const component = factory(tui, theme, {}, (v) => {
+                        doneCalls.push(v);
+                        resolve(v);
+                    });
+                    ui._lastComponent = component;
+                });
             },
+            _lastComponent: undefined,
         };
         const matchKey = (data, id) => data === `<${id}>`;
         let component;
-        showNavigator(ui, rows, { matchKey, truncate }).then((c) => { component = c; });
+        showNavigator(ui, rows, {
+            matchKey,
+            truncate,
+            onComponent: (c) => { component = c; },
+        });
         return {
             ui, tui, doneCalls, customCalls,
             component: () => component,

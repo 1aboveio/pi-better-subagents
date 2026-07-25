@@ -16,7 +16,7 @@ Out of scope: #47 two-press close/dismiss, #48 docs/hardening (except #46 eviden
 | `←` in detail returns to list | S4: leaveDetail, stop timer, restore mode=list | navigator.detail | unit |
 | Escape in detail closes navigator | S4: dispose + done(null) from detail mode | navigator.detail | unit |
 | Returning to list preserves selection for viewed run when still visible | S4: selectById after optional getRows refresh | navigator.detail | unit |
-| Detail timers disposed on back, Escape, overlay close, session teardown | S5: dispose() clears interval; done wrapper + index session_shutdown | navigator.detail | unit |
+| Detail timers disposed on back, Escape, overlay close, session teardown | S5: dispose() clears interval; openTrackedNavigator sync onComponent capture + disposeTrackedNavigator on session_shutdown (Pi custom()→done(null), never component) | navigator.detail | unit |
 | Narrow terminal truncates safely | S2: every detail line through truncate(line, width) before style | navigator.detail | unit |
 | Tests cover all of the above | `tests/navigator_detail.test.mjs` (+ #45 enter-key expectation update) | navigator.detail | unit |
 
@@ -29,6 +29,15 @@ Out of scope: #47 two-press close/dismiss, #48 docs/hardening (except #46 eviden
 - Optional `getRows()` refreshes the list snapshot when leaving detail so a
   disappeared run can clamp selection sensibly.
 - List help line gains `enter open`. Enter is no longer an ignored key (#45 test update).
-- Active overlay `dispose()` is tracked in index.ts and invoked on session_shutdown
-  (TUI-guarded path alongside existing navigator cleanup).
+- Active overlay `dispose()` is tracked via `openTrackedNavigator` (sync
+  `onComponent` capture) and invoked by `disposeTrackedNavigator` on
+  session_shutdown. Pi's `ui.custom()` resolves to `done(null)`, not the
+  component — never capture dispose from the custom() promise (fix round 1:
+  `navigator.detail.timer-lifecycle`).
 - Widget paths untouched. Non-TUI isolation unchanged (`isNavigatorUiAvailable`).
+
+## Fix rounds
+
+| Round | Theme | Closed by |
+|-------|-------|-----------|
+| 1 | `navigator.detail.timer-lifecycle` — `showNavigator().then(component => …)` never saw dispose under Pi custom() semantics | `openTrackedNavigator`/`disposeTrackedNavigator` + Pi-compatible custom() fakes + regression tests proving session_shutdown clears active detail timer |
