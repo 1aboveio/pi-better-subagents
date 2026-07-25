@@ -1,0 +1,529 @@
+/**
+ * Unit tests for issue #45 — minimal subagent navigator from empty-editor Left.
+ *
+ * Pins:
+ * - Footer hint: `← subagents · N` while ≥1 visible current-parent run exists,
+ *   cleared when none, delivered via the default footer status mechanism
+ *   (setStatus) — the full footer is never replaced (no setFooter anywhere).
+ * - Editor interception: bare `←` on an EMPTY editor with visible runs opens
+ *   the navigator; `←` with text delegates to normal cursor-left; any other
+ *   key delegates. The wrapper composes with any existing editor component and
+ *   repeated installs never stack duplicate wrappers.
+ * - Overlay: visible current-parent runs newest first (running AND terminal),
+ *   rows show name-or-ID · effective status · model · elapsed · spend, Up/Down
+ *   move the selection (clamped), Escape closes, overlay requested with
+ *   { overlay: true } (pi focuses overlays on show).
+ * - Non-TUI: the navigator wiring is unavailable without a UI (print/RPC).
+ * - Widget non-regression: widget code paths untouched (existing
+ *   widget_flicker suite is the pin; asserted here by file hash stability of
+ *   behavior via the untouched suite, not re-tested).
+ *
+ * // @covers navigator.footer-hint
+ * // @level unit
+ * // @covers navigator.editor-wrapper
+ * // @level unit
+ * // @covers navigator.overlay
+ * // @level unit
+ */
+import { describe, it, after } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { rmSync } from "node:fs";
+import {
+    writeMeta,
+    readMeta,
+    listMetas,
+    effectiveStatus,
+    navigatorVisibleRuns,
+    navigatorVisibleCount,
+    dismissRun,
+    runDir,
+} from "../registry.ts";
+import {
+    NAVIGATOR_STATUS_KEY,
+    navigatorFooterHint,
+    applyNavigatorFooter,
+    isNavigatorUiAvailable,
+    buildNavigatorRows,
+    createNavigatorState,
+    moveSelection,
+    clampSelection,
+    buildNavigatorLines,
+    createNavigatorOverlayFactory,
+    showNavigator,
+    wrapEditor,
+    installNavigatorEditor,
+} from "../navigator.ts";
+import { fmtElapsed, shortModel } from "../widget.ts";
+
+const THIS_PID = process.pid;
+const FOREIGN_PID = THIS_PID + 1;
+
+/** Unique on-disk test ids; cleaned up in `after` so the real tmpdir registry
+ *  is left as we found it. */
+const diskIds = [];
+function trackDisk(id) {
+    diskIds.push(id);
+    return id;
+}
+after(() => {
+    for (const id of diskIds) {
+        try { rmSync(runDir(id), { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
+});
+
+let n = 0;
+function meta(overrides = {}) {
+    n += 1;
+    return {
+        id: overrides.id ?? `sa_t45_${n}`,
+        status: "completed",
+        pid: 0,
+        spawnPid: THIS_PID,
+        cwd: "/tmp",
+        promptPreview: "p",
+        startedAt: 1,
+        logPath: "/tmp/x.log",
+        sessionId: "s",
+        ...overrides,
+    };
+}
+
+/** Recording fake for pi's UI status surface (the external boundary). */
+function fakeStatusUi() {
+    const calls = [];
+    return {
+        calls,
+        setStatus(key, text) { calls.push([key, text]); },
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Footer hint (AC: hint while visible runs exist, clears at zero, default
+// footer status mechanism, never replaces the footer)
+// ---------------------------------------------------------------------------
+describe("navigator footer hint", () => {
+    // @covers navigator.footer-hint
+    // @level unit
+    it("hint text is `← subagents · N` for N ≥ 1 and null at zero", () => {
+        assert.equal(navigatorFooterHint(1), "← subagents · 1");
+        assert.equal(navigatorFooterHint(3), "← subagents · 3");
+        assert.equal(navigatorFooterHint(0), null);
+    });
+
+    // @covers navigator.footer-hint
+    // @level unit
+    it("applyNavigatorFooter sets the status while visible runs exist and clears it at zero", () => {
+        const ui = fakeStatusUi();
+        applyNavigatorFooter(ui, 2);
+        assert.deepEqual(ui.calls, [[NAVIGATOR_STATUS_KEY, "← subagents · 2"]]);
+        applyNavigatorFooter(ui, 0);
+        assert.deepEqual(ui.calls.at(-1), [NAVIGATOR_STATUS_KEY, undefined]);
+    });
+
+    // @covers navigator.footer-hint
+    // @covers navigator.overlay
+    // @level unit
+    it("hint count and overlay list share the #44 visibility seam (dismissed + foreign excluded)", () => {
+        const ownId = trackDisk(`sa_t45_vis_${Date.now()}`);
+        const termId = trackDisk(`sa_t45_vist_${Date.now()}`);
+        const dismissedId = trackDisk(`sa_t45_visd_${Date.now()}`);
+        writeMeta(meta({ id: ownId, status: "running", pid: THIS_PID, startedAt: 100 }));
+        writeMeta(meta({ id: termId, startedAt: 50 }));
+        writeMeta(meta({ id: dismissedId, startedAt: 10 }));
+        dismissRun(dismissedId);
+        const metas = listMetas();
+        const visible = navigatorVisibleRuns(metas, THIS_PID);
+        assert.equal(navigatorVisibleCount(metas, THIS_PID), visible.length);
+        const ids = visible.map((m) => m.id);
+        assert.ok(ids.includes(ownId) && ids.includes(termId), "running AND terminal runs are visible");
+        assert.ok(!ids.includes(dismissedId), "dismissed runs are excluded from the count/list");
+    });
+
+    // @covers navigator.footer-hint
+    // @level unit
+    it("the extension never replaces the full footer (no setFooter in the wiring)", () => {
+        const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+        assert.ok(!src.includes("setFooter"), "index.ts must not call setFooter — the hint uses setStatus only");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Non-TUI guard (AC: navigator inactive in non-TUI modes)
+// ---------------------------------------------------------------------------
+describe("non-TUI guard", () => {
+    // @covers navigator.footer-hint
+    // @covers navigator.editor-wrapper
+    // @level unit
+    it("navigator UI is available only with hasUI and a ui object", () => {
+        assert.equal(isNavigatorUiAvailable({ hasUI: true, ui: {} }), true);
+        assert.equal(isNavigatorUiAvailable({ hasUI: false, ui: {} }), false);
+        assert.equal(isNavigatorUiAvailable({ hasUI: false }), false);
+        assert.equal(isNavigatorUiAvailable(undefined), false);
+        assert.equal(isNavigatorUiAvailable({ hasUI: true }), false);
+    });
+
+    // @covers navigator.footer-hint
+    // @covers navigator.editor-wrapper
+    // @level unit
+    it("every navigator entry point in index.ts is behind the hasUI guard", () => {
+        const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+        // The guard seam is the single gate used by footer install/update, the
+        // editor install, and overlay open — print/RPC contexts fail it.
+        assert.ok(src.includes("isNavigatorUiAvailable"), "index.ts must gate navigator wiring on isNavigatorUiAvailable");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Editor wrapper (AC: empty-editor interception, non-empty delegation,
+// composition with any existing editor, no stacked wrappers on reload)
+// ---------------------------------------------------------------------------
+
+/** Fake standing in for pi's Editor (external boundary). */
+function fakeEditor(text = "") {
+    return {
+        text,
+        inputs: [],
+        renders: 0,
+        onSubmit: undefined,
+        getText() { return this.text; },
+        setText(t) { this.text = t; },
+        handleInput(d) { this.inputs.push(d); },
+        render(w) { this.renders++; return [`ed:${this.text}`.slice(0, w)]; },
+        invalidate() {},
+    };
+}
+
+const LEFT = "\x1b[D";
+const isLeft = (d) => d === LEFT;
+
+function wrapperDeps(overrides = {}) {
+    return {
+        isOpenTrigger: isLeft,
+        canOpen: () => true,
+        onOpen: () => {},
+        ...overrides,
+    };
+}
+
+describe("editor wrapper interception", () => {
+    // @covers navigator.editor-wrapper
+    // @level unit
+    it("bare ← on an EMPTY editor with visible runs opens the navigator and is not delegated", () => {
+        const inner = fakeEditor("");
+        let opened = 0;
+        const w = wrapEditor(inner, wrapperDeps({ onOpen: () => opened++ }));
+        w.handleInput(LEFT);
+        assert.equal(opened, 1, "open callback must fire");
+        assert.deepEqual(inner.inputs, [], "the triggering key must not reach the inner editor");
+    });
+
+    // @covers navigator.editor-wrapper
+    // @level unit
+    it("bare ← while the editor contains text delegates to normal cursor-left behavior", () => {
+        const inner = fakeEditor("hello");
+        let opened = 0;
+        const w = wrapEditor(inner, wrapperDeps({ onOpen: () => opened++ }));
+        w.handleInput(LEFT);
+        assert.equal(opened, 0, "navigator must not open while editing");
+        assert.deepEqual(inner.inputs, [LEFT], "← must reach the inner editor unchanged");
+    });
+
+    // @covers navigator.editor-wrapper
+    // @level unit
+    it("bare ← on an empty editor with NO visible runs delegates (no navigator affordance)", () => {
+        const inner = fakeEditor("");
+        let opened = 0;
+        const w = wrapEditor(inner, wrapperDeps({ canOpen: () => false, onOpen: () => opened++ }));
+        w.handleInput(LEFT);
+        assert.equal(opened, 0);
+        assert.deepEqual(inner.inputs, [LEFT]);
+    });
+
+    // @covers navigator.editor-wrapper
+    // @level unit
+    it("any other key delegates unchanged, even on an empty editor with visible runs", () => {
+        const inner = fakeEditor("");
+        let opened = 0;
+        const w = wrapEditor(inner, wrapperDeps({ onOpen: () => opened++ }));
+        w.handleInput("a");
+        w.handleInput("\x1b[A"); // up
+        w.handleInput("\x1b[1;5D"); // ctrl+left is NOT bare left
+        assert.equal(opened, 0);
+        assert.deepEqual(inner.inputs, ["a", "\x1b[A", "\x1b[1;5D"]);
+    });
+
+    // @covers navigator.editor-wrapper
+    // @level unit
+    it("the wrapper composes with the wrapped editor: property sets/gets and methods pass through", () => {
+        const inner = fakeEditor("draft");
+        const w = wrapEditor(inner, wrapperDeps());
+        // pi assigns these on the component it receives (see setCustomEditorComponent).
+        w.onSubmit = () => "submitted";
+        assert.equal(typeof inner.onSubmit, "function", "onSubmit must land on the inner editor");
+        assert.equal(inner.onSubmit(), "submitted");
+        w.setText("changed");
+        assert.equal(inner.getText(), "changed");
+        assert.deepEqual(w.render(40), ["ed:changed"]);
+        assert.equal(inner.renders, 1);
+        // Duck-typing used by pi to wire app-level handlers must survive wrapping.
+        assert.equal("handleInput" in w, true);
+        assert.equal("onSubmit" in w, true);
+    });
+});
+
+describe("editor wrapper installation", () => {
+    /** Fake for pi's ctx.ui editor-factory surface. */
+    function fakeEditorUi(prevFactory) {
+        const calls = { set: 0 };
+        return {
+            calls,
+            factory: prevFactory,
+            getEditorComponent() { return this.factory; },
+            setEditorComponent(f) { this.factory = f; calls.set++; },
+        };
+    }
+
+    // @covers navigator.editor-wrapper
+    // @level unit
+    it("installs a factory that wraps a default editor when none was configured", () => {
+        const ui = fakeEditorUi(undefined);
+        const inner = fakeEditor("");
+        let opened = 0;
+        installNavigatorEditor(ui, wrapperDeps({
+            createDefaultEditor: () => inner,
+            onOpen: () => opened++,
+        }));
+        assert.equal(ui.calls.set, 1);
+        const editor = ui.factory("tui", "theme", "kb");
+        editor.handleInput(LEFT);
+        assert.equal(opened, 1, "installed wrapper must intercept empty-editor ←");
+    });
+
+    // @covers navigator.editor-wrapper
+    // @level unit
+    it("composes with a previously installed editor component rather than replacing it", () => {
+        const inner = fakeEditor("x");
+        let prevBuilt = 0;
+        const prevFactory = () => { prevBuilt++; return inner; };
+        const ui = fakeEditorUi(prevFactory);
+        installNavigatorEditor(ui, wrapperDeps({ createDefaultEditor: () => { throw new Error("must not build default"); } }));
+        const editor = ui.factory("tui", "theme", "kb");
+        assert.equal(prevBuilt, 1, "the previous factory must be used as the inner editor");
+        editor.handleInput("a");
+        assert.deepEqual(inner.inputs, ["a"], "input must reach the previously installed editor");
+    });
+
+    // @covers navigator.editor-wrapper
+    // @level unit
+    it("repeated installs (reload / session restart) do not stack duplicate wrappers", () => {
+        const ui = fakeEditorUi(undefined);
+        const inner1 = fakeEditor("");
+        const inner2 = fakeEditor("");
+        let built1 = 0;
+        installNavigatorEditor(ui, wrapperDeps({ createDefaultEditor: () => { built1++; return inner1; } }));
+        const first = ui.factory;
+        // pi builds an editor from the installed factory (pre-refresh).
+        const editor1 = ui.factory("tui", "theme", "kb");
+        assert.equal(built1, 1);
+        let opened2 = 0;
+        installNavigatorEditor(ui, wrapperDeps({
+            createDefaultEditor: () => inner2,
+            onOpen: () => opened2++,
+        }));
+        assert.equal(ui.calls.set, 1, "second install must NOT call setEditorComponent again");
+        assert.equal(ui.factory, first, "the same factory must be kept");
+        // The already-built editor keeps working through the ORIGINAL wrapper
+        // with REFRESHED deps — one interception layer, no stacked wrappers.
+        editor1.handleInput(LEFT);
+        assert.equal(opened2, 1, "refreshed deps must drive the existing wrapper");
+        assert.deepEqual(inner1.inputs, [], "the key was intercepted exactly once");
+        // A new editor built after the refresh is likewise wrapped exactly once.
+        const editor2 = ui.factory("tui", "theme", "kb");
+        editor2.handleInput(LEFT);
+        assert.equal(opened2, 2);
+        assert.deepEqual(inner2.inputs, []);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Overlay (AC: newest-first visible runs incl. running+terminal, row fields,
+// Up/Down selection, Escape close, focused overlay)
+// ---------------------------------------------------------------------------
+
+function rowDeps(overrides = {}) {
+    return {
+        effectiveStatus: (m) => m.status,
+        shortModel,
+        fmtElapsed,
+        spendFor: () => "",
+        now: 100_000,
+        ...overrides,
+    };
+}
+
+describe("navigator rows", () => {
+    // @covers navigator.overlay
+    // @level unit
+    it("rows come newest first from the real registry and include running and terminal runs", () => {
+        const older = trackDisk(`sa_t45_ord1_${Date.now()}`);
+        const newer = trackDisk(`sa_t45_ord2_${Date.now()}`);
+        writeMeta(meta({ id: older, startedAt: 1000, status: "completed" }));
+        writeMeta(meta({ id: newer, startedAt: 2000, status: "running", pid: THIS_PID }));
+        const rows = buildNavigatorRows(navigatorVisibleRuns(listMetas(), THIS_PID), {
+            ...rowDeps(),
+            effectiveStatus,
+        }).filter((r) => [older, newer].includes(r.id));
+        assert.deepEqual(rows.map((r) => r.id), [newer, older], "newest first");
+        assert.equal(rows[0].status, "running");
+        assert.equal(rows[1].status, "completed");
+    });
+
+    // @covers navigator.overlay
+    // @level unit
+    it("each row carries name-or-ID, effective status, model, elapsed, and spend", () => {
+        const rows = buildNavigatorRows([
+            meta({ id: "sa_t45_named", name: "reviewer", model: "xai/grok-4.5", startedAt: 90_000 }),
+            meta({ id: "sa_t45_unnamed", startedAt: 0, endedAt: 61_000 }),
+        ], rowDeps({ spendFor: (m) => (m.id === "sa_t45_named" ? "1.2k tok (↑800 ↓400) · $0.01" : "") }));
+        assert.equal(rows[0].name, "reviewer");
+        assert.equal(rows[0].status, "completed");
+        assert.equal(rows[0].model, "grok-4.5");
+        assert.equal(rows[0].elapsed, "10s");
+        assert.equal(rows[0].spend, "1.2k tok (↑800 ↓400) · $0.01");
+        assert.equal(rows[1].name, undefined, "unnamed run falls back to id at render time");
+        assert.equal(rows[1].elapsed, "1m 01s", "terminal runs freeze elapsed at endedAt");
+    });
+});
+
+describe("navigator selection state", () => {
+    // @covers navigator.overlay
+    // @level unit
+    it("starts on the first row and clamps movement at both ends", () => {
+        const state = createNavigatorState([{ id: "a" }, { id: "b" }, { id: "c" }]);
+        assert.equal(state.selected, 0);
+        assert.equal(moveSelection(state, -1), false, "moving up at the top changes nothing");
+        assert.equal(state.selected, 0);
+        assert.equal(moveSelection(state, 1), true);
+        assert.equal(state.selected, 1);
+        assert.equal(moveSelection(state, 1), true);
+        assert.equal(state.selected, 2);
+        assert.equal(moveSelection(state, 1), false, "moving down at the bottom changes nothing");
+        assert.equal(state.selected, 2);
+    });
+
+    // @covers navigator.overlay
+    // @level unit
+    it("clamps a selection that outlives its row list", () => {
+        const state = createNavigatorState([{ id: "a" }, { id: "b" }]);
+        state.selected = 1;
+        state.rows = [{ id: "a" }];
+        clampSelection(state);
+        assert.equal(state.selected, 0);
+        state.rows = [];
+        clampSelection(state);
+        assert.equal(state.selected, 0);
+    });
+});
+
+describe("navigator overlay component", () => {
+    const truncate = (s, w) => (s.length > w ? s.slice(0, Math.max(0, w)) : s);
+
+    function driveOverlay(rows, keyIds = {}) {
+        const tui = { renders: 0, requestRender() { this.renders++; } };
+        const theme = { fg: (c, s) => `<${c}>${s}</>` };
+        const doneCalls = [];
+        const customCalls = [];
+        const ui = {
+            custom(factory, options) {
+                customCalls.push(options);
+                const component = factory(tui, theme, {}, (v) => doneCalls.push(v));
+                return Promise.resolve(component);
+            },
+        };
+        const matchKey = (data, id) => data === `<${id}>`;
+        let component;
+        showNavigator(ui, rows, { matchKey, truncate }).then((c) => { component = c; });
+        return {
+            ui, tui, doneCalls, customCalls,
+            component: () => component,
+            press: (d) => component.handleInput(d),
+        };
+    }
+
+    // @covers navigator.overlay
+    // @level unit
+    it("opens as a focused overlay ({ overlay: true }) listing every visible run", async () => {
+        const rows = [
+            { id: "sa_1", name: "newest", status: "running", model: "grok-4.5", elapsed: "5s", spend: "" },
+            { id: "sa_2", status: "completed", model: "?", elapsed: "1m 01s", spend: "1.2k tok (↑800 ↓400) · $0.01" },
+        ];
+        const o = driveOverlay(rows);
+        await Promise.resolve();
+        assert.deepEqual(o.customCalls, [{ overlay: true }], "must request overlay mode (pi focuses overlays on show)");
+        const lines = o.component().render(80);
+        assert.equal(lines.length, 4, "title + 2 rows + help");
+        const plain = lines.map((l) => l.replace(/<\/?[a-z]*>/g, ""));
+        assert.ok(plain[0].includes("Subagents · 2"));
+        assert.ok(plain[1].startsWith("> "), "first row selected by default");
+        assert.ok(plain[1].includes("newest · running · grok-4.5 · 5s"));
+        assert.ok(plain[2].startsWith("  "));
+        assert.ok(plain[2].includes("sa_2 · completed · ? · 1m 01s · 1.2k tok"), "unnamed run shows its id and spend");
+        assert.ok(plain[3].includes("esc"), "help line advertises escape");
+    });
+
+    // @covers navigator.overlay
+    // @level unit
+    it("every rendered line fits the given width, even with long names", async () => {
+        const longName = "n".repeat(200);
+        const o = driveOverlay([{ id: "sa_1", name: longName, status: "running", model: "m", elapsed: "5s", spend: "x".repeat(100) }]);
+        await Promise.resolve();
+        for (const w of [20, 37, 80]) {
+            for (const line of o.component().render(w)) {
+                const plain = line.replace(/<\/?[a-z]*>/g, "");
+                assert.ok(plain.length <= w, `line exceeds width ${w}: ${JSON.stringify(plain)}`);
+            }
+        }
+    });
+
+    // @covers navigator.overlay
+    // @level unit
+    it("Up and Down move the selected row (clamped) and request a render", async () => {
+        const o = driveOverlay([
+            { id: "a", status: "running", model: "m", elapsed: "1s", spend: "" },
+            { id: "b", status: "failed", model: "m", elapsed: "2s", spend: "" },
+        ]);
+        await Promise.resolve();
+        o.press("<up>");
+        assert.equal(o.tui.renders, 0, "clamped move does not repaint");
+        o.press("<down>");
+        assert.equal(o.tui.renders, 1);
+        let plain = o.component().render(80).map((l) => l.replace(/<\/?[a-z]*>/g, ""));
+        assert.ok(plain[2].startsWith("> "), "selection moved to the second row");
+        o.press("<down>");
+        assert.equal(o.tui.renders, 1, "clamped at the bottom");
+        o.press("<up>");
+        plain = o.component().render(80).map((l) => l.replace(/<\/?[a-z]*>/g, ""));
+        assert.ok(plain[1].startsWith("> "));
+    });
+
+    // @covers navigator.overlay
+    // @level unit
+    it("Escape closes the navigator", async () => {
+        const o = driveOverlay([{ id: "a", status: "running", model: "m", elapsed: "1s", spend: "" }]);
+        await Promise.resolve();
+        o.press("<escape>");
+        assert.deepEqual(o.doneCalls, [null], "escape resolves the overlay close");
+    });
+
+    // @covers navigator.overlay
+    // @level unit
+    it("unrelated keys are ignored by the overlay (no close, no repaint)", async () => {
+        const o = driveOverlay([{ id: "a", status: "running", model: "m", elapsed: "1s", spend: "" }]);
+        await Promise.resolve();
+        o.press("x");
+        o.press("<enter>");
+        assert.deepEqual(o.doneCalls, []);
+        assert.equal(o.tui.renders, 0);
+    });
+});
