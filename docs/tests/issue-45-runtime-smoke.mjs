@@ -12,7 +12,8 @@
  *
  * Rerun:  node docs/tests/issue-45-runtime-smoke.mjs > docs/tests/issue-45-runtime-smoke.json
  */
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { register } from "node:module";
 import { rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -202,67 +203,62 @@ await record(
 );
 
 // 4. index.ts (extension entry) — parses; navigator wiring present; no setFooter;
-//    real pi RPC startup-through-shutdown emits no navigator setStatus.
+//    registered extension RPC startup-through-shutdown emits no navigator setStatus.
 await record(
     "index.ts (extension entry)",
-    "node --experimental-strip-types --check index.ts && pi --mode rpc --no-session --no-extensions -e ./index.ts < get_state",
+    "node --experimental-strip-types --check index.ts && node docs/tests/issue-45-runtime-smoke.mjs (registered RPC path)",
     async () => {
         const repoRoot = path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
         execFileSync(process.execPath, ["--experimental-strip-types", "--check", "index.ts"], {
             cwd: repoRoot,
             stdio: "pipe",
         });
-        // Live RPC probe: load the real extension, run get_state, close stdin so
-        // session_shutdown fires. At bc0d0f this emitted extension_ui_request
-        // setStatus/subagents-nav on shutdown; the TUI-only guard must block it.
+        // Live registered-path RPC probe: load the real extension factory
+        // in-process (host packages stubbed via pi_host_stub_hooks) and drive
+        // session_start → session_shutdown under an RPC-shaped ctx. At bc0d0f
+        // this emitted setStatus/subagents-nav on shutdown; the TUI-only guard
+        // must block it. No global `pi` binary required (CI has none on PATH).
         // Widget setWidget remains allowed in RPC and is not asserted away.
-        const events = await new Promise((resolve, reject) => {
-            const child = spawn(
-                "pi",
-                ["--mode", "rpc", "--no-session", "--no-extensions", "-e", "./index.ts"],
-                { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] },
-            );
-            let out = "";
-            let err = "";
-            child.stdout.on("data", (d) => { out += d; });
-            child.stderr.on("data", (d) => { err += d; });
-            const failTimer = setTimeout(() => {
-                try { child.kill("SIGTERM"); } catch { /* ignore */ }
-                reject(new Error(`pi RPC probe timed out; stderr=${err.slice(0, 400)}`));
-            }, 8000);
-            setTimeout(() => {
-                try {
-                    child.stdin.write(JSON.stringify({ type: "get_state" }) + "\n");
-                    child.stdin.end();
-                } catch { /* ignore */ }
-            }, 150);
-            child.on("error", (e) => {
-                clearTimeout(failTimer);
-                reject(e);
-            });
-            child.on("close", () => {
-                clearTimeout(failTimer);
-                resolve(
-                    out
-                        .split(/\n+/)
-                        .map((l) => l.trim())
-                        .filter(Boolean)
-                        .map((l) => {
-                            try { return JSON.parse(l); } catch { return { raw: l }; }
-                        }),
-                );
-            });
-        });
-        const navStatus = events.filter(
-            (e) => e && e.type === "extension_ui_request"
-                && e.method === "setStatus"
-                && e.statusKey === NAVIGATOR_STATUS_KEY,
-        );
+        register(new URL("../../tests/pi_host_stub_hooks.mjs", import.meta.url));
+        const { default: betterSubagents } = await import("../../index.ts");
+
+        const statusCalls = [];
+        const editorCalls = [];
+        const customCalls = [];
+        const handlers = {};
+        const ui = {
+            setStatus(key, text) { statusCalls.push([key, text]); },
+            getEditorComponent() { return undefined; },
+            setEditorComponent(...a) { editorCalls.push(a); },
+            custom(...a) { customCalls.push(a); return Promise.resolve(undefined); },
+            setWidget() {},
+        };
+        const rpcCtx = {
+            mode: "rpc",
+            hasUI: true,
+            ui,
+            cwd: "/tmp",
+            model: { provider: "test", id: "model" },
+        };
+        const pi = {
+            registerTool() {},
+            on(event, fn) { handlers[event] = fn; },
+            sendMessage() {},
+        };
+        betterSubagents(pi);
+        check(typeof handlers.session_start === "function", "session_start must register");
+        check(typeof handlers.session_shutdown === "function", "session_shutdown must register");
+        await handlers.session_start({}, rpcCtx);
+        await handlers.session_shutdown({}, rpcCtx);
+
+        const navStatus = statusCalls.filter(([key]) => key === NAVIGATOR_STATUS_KEY);
         check(
             navStatus.length === 0,
             `RPC startup-through-shutdown must not emit navigator setStatus; got ${JSON.stringify(navStatus)}`,
         );
-        return "index.ts parses under node type-stripping; footer hint via setStatus seam only (no setFooter); installNavigator/updateNavigatorFooter wired into session_start + subagent_spawn; real pi RPC startup-through-shutdown: 0 navigator setStatus (shutdown cleanup TUI-guarded)";
+        check(editorCalls.length === 0, "RPC must not install navigator editor");
+        check(customCalls.length === 0, "RPC must not open navigator overlay");
+        return "index.ts parses under node type-stripping; footer hint via setStatus seam only (no setFooter); installNavigator/updateNavigatorFooter wired into session_start + subagent_spawn; registered extension RPC startup-through-shutdown: 0 navigator setStatus (shutdown cleanup TUI-guarded; no global pi binary)";
     },
 );
 

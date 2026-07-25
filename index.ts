@@ -277,6 +277,8 @@ export function isHealthTickerActive(): boolean {
 let spawnIdentityProbe: ProcessProbe = realProcessProbe;
 export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void {
     spawnIdentityProbe = probe ?? realProcessProbe;
+}
+
 // ---- minimal subagent navigator (empty-editor ←, #45) --------------------
 //
 // Human-facing TUI surface, kept separate from the passive live widget (which
