@@ -1,21 +1,21 @@
 {
   "unit": "#103",
-  "headNote": "exact HEAD after pushurl metacharacter clear fix; smoke observed on same tree semantics",
+  "headNote": "content HEAD of metachar clear fix; stamp commit may follow",
   "results": [
     {
       "surface": "git_remotes.read",
       "kind": "library",
       "status": "pass",
-      "command": "node --experimental-strip-types -e '<inline metachar multi-stale→multi-desired read+sync+push smoke>'",
+      "command": "node --experimental-strip-types -e '<inline metachar multi-stale\u2192multi-desired read+sync+push smoke>'",
       "observed": "SMOKE PASS: metachar multi-stale clear via unset-all; push reached desired[a]/desired[b]; stale[1]/stale[2]/fetch empty; --delete would have failed"
     },
     {
       "surface": "git_remotes.sync",
       "kind": "library",
       "status": "pass",
-      "command": "node --experimental-strip-types -e '<inline metachar multi-stale→multi-desired read+sync+push smoke>'",
+      "command": "node --experimental-strip-types -e '<inline metachar multi-stale\u2192multi-desired read+sync+push smoke>'",
       "observed": "SMOKE PASS: metachar multi-stale clear via unset-all; push reached desired[a]/desired[b]; stale[1]/stale[2]/fetch empty; --delete would have failed"
     }
   ],
-  "headSha": "PENDING_FINAL_HEAD"
+  "headSha": "4900dccd4fe4d5796f7486eb7077c192686a5f5e"
 }
