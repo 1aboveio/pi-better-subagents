@@ -17,3 +17,10 @@ surfaces:
   stop.shared:
     requiredLevels: [unit]
     verified: false
+  # The registered model-facing tool handlers (subagent_list / _output /
+  # _result / _stop) exactly as index.ts passes them to pi.registerTool —
+  # extracted to tools.ts so tests invoke the same execute functions the
+  # model reaches. Includes a mutation member (subagent_stop).
+  tools.model-facing:
+    requiredLevels: [unit]
+    verified: false

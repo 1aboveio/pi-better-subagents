@@ -12,12 +12,12 @@
  */
 
 import { execSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs";
+import { writeFileSync, mkdirSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { spawnDetached, type SpawnResult } from "./spawn.ts";
-import { parseRun, tailLog, formatSubagentOutputBody, formatSubagentResultBody, type Usage } from "./parse.ts";
-import { classifyChildExit, formatIncompleteResult } from "./lifecycle.ts";
+import { parseRun, type Usage } from "./parse.ts";
+import { classifyChildExit } from "./lifecycle.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { maybeBuildSandboxCommand } from "./sandbox.ts";
@@ -33,7 +33,6 @@ import {
     readMeta,
     listMetas,
     effectiveStatus,
-    isFinalResultStatus,
     ownedByThisParent,
     canExitFinalize,
     type RunMeta,
@@ -57,8 +56,14 @@ import {
     formatCapacityRejectMessage,
     getSharedCapacityGate,
 } from "./capacity.mjs";
-import { stopRun } from "./stop.ts";
 import { formatCallbackTrigger, formatCallbackQuiet, buildCompletionDelivery } from "./completion.ts";
+import {
+    text,
+    subagentListTool,
+    subagentOutputTool,
+    subagentResultTool,
+    subagentStopTool,
+} from "./tools.ts";
 import {
     SPINNER,
     TICK_MS,
@@ -69,12 +74,6 @@ import {
     nextWidgetAction,
     isSpendCacheFresh,
 } from "./widget.ts";
-import {
-    SUBAGENT_LIST_DEFAULT_LIMIT,
-    SUBAGENT_LIST_MAX_LIMIT,
-    SUBAGENT_LIST_STATUSES,
-    buildSubagentList,
-} from "./list.ts";
 
 /** The tools this extension registers — excluded from children by default so a
  *  subagent cannot recursively spawn more subagents unless explicitly allowed. */
@@ -86,8 +85,6 @@ const SUBAGENT_TOOLS = [
     "subagent_stop",
     "subagent_result",
 ];
-
-const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
 // ---- live status widget (Claude Code-style) ------------------------------
 //
@@ -279,7 +276,6 @@ function resolvePiBinary(): string {
     }
     return cachedPi;
 }
-
 
 /**
  * Finalize a run once its child exits. Idempotent: a run already marked
@@ -681,137 +677,15 @@ export default function (pi: ExtensionAPI) {
         },
     });
 
-    // ---- subagent_list --------------------------------------------------
-    pi.registerTool({
-        name: "subagent_list",
-        label: "List Subagents",
-        description:
-            `List background subagent runs with status and metadata. Non-blocking. ` +
-            `Default: this parent process only, newest first, limit ${SUBAGENT_LIST_DEFAULT_LIMIT}. ` +
-            `Pass all:true for machine-global; limit is clamped to max ${SUBAGENT_LIST_MAX_LIMIT}.`,
-        promptSnippet: "List background subagent runs and their status",
-        parameters: Type.Object({
-            all: Type.Optional(Type.Boolean({ description: "If true, list every run on this machine. Default false = only runs spawned by this pi process." })),
-            limit: Type.Optional(Type.Number({ description: `Maximum rows to display (default ${SUBAGENT_LIST_DEFAULT_LIMIT}, max ${SUBAGENT_LIST_MAX_LIMIT}; larger values are clamped).` })),
-            status: Type.Optional(Type.Array(Type.String(), { description: `Effective statuses to include: ${SUBAGENT_LIST_STATUSES.join(", ")}.` })),
-        }),
-        async execute(_toolCallId, params) {
-            const p = (params ?? {}) as { all?: boolean; limit?: number; status?: string[] | string };
-            return text(buildSubagentList({
-                metas: listMetas(),
-                params: p,
-                parentPid: process.pid,
-                now: Date.now(),
-                statusOf: effectiveStatus,
-                usageById: (id: string) => parseRun(id).usage,
-            }));
-        },
-    });
-
-    // ---- subagent_output ------------------------------------------------
-    pi.registerTool({
-        name: "subagent_output",
-        label: "Subagent Output",
-        description:
-            "Tail the live output of a subagent run. Non-blocking: returns whatever exists right now and " +
-            "returns immediately whether or not the run has finished. Never waits.",
-        promptSnippet: "Peek at a subagent's current output without waiting",
-        promptGuidelines: [
-            "Use subagent_output only when the user explicitly asks how a run is progressing. It never waits — do not call it in a loop.",
-        ],
-        parameters: Type.Object({
-            id: Type.String({ description: "Run id from subagent_spawn." }),
-            tail_lines: Type.Optional(Type.Number({ description: "How many trailing lines to show (default 40)." })),
-        }),
-        async execute(_id, params) {
-            const p = params as { id: string; tail_lines?: number };
-            const meta = readMeta(p.id);
-            if (!meta) throw new Error(`Unknown run id: ${p.id}`);
-            const st = effectiveStatus(meta);
-            const r = parseRun(p.id);
-            const el = fmtElapsed((meta.endedAt ?? Date.now()) - meta.startedAt);
-            const spend = fmtSpend(r.usage);
-            const head = `[${p.id} · ${st} · ${el}${spend ? ` · ${spend}` : ""}]`;
-            const tools = r.toolCalls.length ? `\ntools used: ${r.toolCalls.join(", ")}` : "";
-            const raw = tailLog(p.id, p.tail_lines ?? 40);
-            return text(formatSubagentOutputBody(head, tools, r.finalText || r.lastActivity || undefined, raw, r.diagnostics));
-        },
-    });
-
-    // ---- subagent_result ------------------------------------------------
-    pi.registerTool({
-        name: "subagent_result",
-        label: "Subagent Result",
-        description:
-            "Read a subagent's final output if it has finished. NEVER waits: if the run is still going it " +
-            "says so and returns immediately.",
-        promptSnippet: "Read a finished subagent's final result (never waits)",
-        promptGuidelines: [
-            "Use subagent_result to collect a finished run's output. If it reports the run is still going, stop — do not poll; you'll be notified when it finishes.",
-        ],
-        parameters: Type.Object({
-            id: Type.String({ description: "Run id from subagent_spawn." }),
-        }),
-        async execute(_id, params) {
-            const p = params as { id: string };
-            const meta = readMeta(p.id);
-            if (!meta) throw new Error(`Unknown run id: ${p.id}`);
-            const st = effectiveStatus(meta);
-            if (!isFinalResultStatus(st)) {
-                if (st === "orphaned") {
-                    // Non-terminal: supervision is broken but related process-
-                    // group work may still be alive — never present this as a
-                    // final result.
-                    return text(
-                        `Run ${p.id} is orphaned — supervision was lost, but related processes may still be alive. ` +
-                        `There is no final result; use subagent_output for current (possibly still changing) output.`,
-                    );
-                }
-                return text(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`);
-            }
-            const exit = meta.exitCode === undefined ? "?" : String(meta.exitCode);
-            const r = parseRun(p.id);
-            const el = fmtElapsed((meta.endedAt ?? Date.now()) - meta.startedAt);
-            const spend = fmtSpend(r.usage);
-            const statSeg = ` · ${el}${spend ? ` · ${spend}` : ""}`;
-            const tools = r.toolCalls.length ? ` · tools: ${r.toolCalls.join(", ")}` : "";
-            const diagnostic = st === "lost"
-                ? `\nRun is lost: no related process remains and no coherent terminal result was observed. Best-available artifacts below.`
-                : "";
-            const rawTail = tailLog(p.id, 40);
-            if (meta.failureReason === "incomplete-stream") {
-                return text(`[${p.id} · ${st} · exit ${exit}${statSeg}${tools}]\n${formatIncompleteResult(r, rawTail)}`);
-            }
-            return text(formatSubagentResultBody(
-                `[${p.id} · ${st} · exit ${exit}${statSeg}${tools}]${diagnostic}`,
-                r.finalText || undefined,
-                rawTail,
-                r.diagnostics,
-            ));
-        },
-    });
-
-    // ---- subagent_stop --------------------------------------------------
-    pi.registerTool({
-        name: "subagent_stop",
-        label: "Stop Subagent",
-        description: "Terminate a running subagent (SIGTERM to its process group).",
-        promptSnippet: "Stop a running background subagent",
-        parameters: Type.Object({
-            id: Type.String({ description: "Run id from subagent_spawn." }),
-        }),
-        async execute(_id, params) {
-            const p = params as { id: string };
-            // Shared stop semantics with the TUI navigator close action (#44):
-            // stopRun rereads meta + effective status from disk before acting.
-            const outcome = stopRun(p.id);
-            if (outcome.action === "not-running") {
-                return text(`Run ${p.id} is not running (${outcome.status}).`);
-            }
-            renderWidget();
-            return text(`Stopped subagent ${p.id}.`);
-        },
-    });
+    // ---- model-facing read/stop tools -----------------------------------
+    // The definitions live in tools.ts; registration uses the exact objects
+    // the factories return, so tests invoke the same execute handlers the
+    // model reaches (no drift-prone second copy). Stop's only UI side effect
+    // (widget redraw after a kill) is injected as onStopped.
+    pi.registerTool(subagentListTool(Type));
+    pi.registerTool(subagentOutputTool(Type));
+    pi.registerTool(subagentResultTool(Type));
+    pi.registerTool(subagentStopTool(Type, { onStopped: renderWidget }));
 
     // ---- live-status lifecycle -----------------------------------------
     // Capture a UI-bearing context and, if runs from a prior session are still

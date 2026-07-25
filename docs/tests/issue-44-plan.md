@@ -1,7 +1,7 @@
 # Issue #44 — Incremental plan (implement-and-pr step 4)
 
 Unit: #44 Add durable navigator visibility and shared stop semantics
-Branch: issue-44-navigator-visibility-stop (from origin/main @ 070c145)
+Branch: issue-44-navigator-visibility-stop (rebased on origin/main @ 7ba67e9)
 TDD: yes (AC-backed). RED first per slice, then GREEN.
 
 ## Slice map (AC → slice → surface → level)
@@ -16,6 +16,7 @@ TDD: yes (AC-backed). RED first per slice, then GREEN.
 | AC6 shared stop for tool + future navigator close | S4: new `stop.ts` `stopRun(id)`; `subagent_stop` refactored to use it | stop.shared | unit |
 | AC7 stop rereads effective status before acting | S4: stopRun reads meta fresh + effectiveStatus; stale-running/dead-pid test | stop.shared | unit |
 | AC8 tests | tests/navigator_dismissal.test.mjs | all above | unit |
+| Fix round (reviewer finding): AC4/AC5 pinned only at registry level | S5: extract tool definitions to `tools.ts` factories; index.ts registers the exact factory objects; tests invoke the registered handlers against dismissed runs | tools.model-facing | unit |
 
 ## Notes
 
@@ -23,10 +24,11 @@ TDD: yes (AC-backed). RED first per slice, then GREEN.
   seams (`navigatorVisibleRuns` / `navigatorVisibleCount` / `dismissRun` /
   `stopRun`) those units consume. Footer count = `navigatorVisibleCount`.
 - Tool compatibility (AC4) for output/result holds by construction (they look
-  up by id via readMeta and never filter dismissal); pinned via readMeta and
-  stopRun tests on dismissed runs.
+  up by id via readMeta and never filter dismissal); after the S5 fix round it
+  is pinned at the REGISTERED-handler level (the exact execute functions
+  pi.registerTool receives), not just via readMeta/stopRun.
 - stopRun tests use a real detached `sleep` process (external OS process; no
   mock of internal seams).
-- Characterization: `subagent_stop` behavior pinned by existing suite +
-  message text preserved; refactor keeps tool output identical.
+- Characterization: tool-handler behavior pinned by the relocated logic
+  landing verbatim in `tools.ts` + handler-level tests; reply text preserved.
 - Browser/E2E: N/A (pi extension, no bootable browser app).

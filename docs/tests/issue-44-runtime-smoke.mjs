@@ -23,6 +23,23 @@ import {
 } from "../../registry.ts";
 import { stopRun } from "../../stop.ts";
 import { processExists } from "../../spawn.ts";
+import {
+    subagentListTool,
+    subagentOutputTool,
+    subagentResultTool,
+    subagentStopTool,
+} from "../../tools.ts";
+
+// The parameters schema is inert data to the handlers; the stub keeps tools.ts
+// loadable outside the pi runtime (same trick as tests/navigator_dismissal.test.mjs).
+const TypeStub = {
+    Object: (v) => v,
+    String: (v) => v,
+    Number: (v) => v,
+    Boolean: (v) => v,
+    Array: (v) => v,
+    Optional: (v) => v,
+};
 
 const THIS_PID = process.pid;
 const results = [];
@@ -149,7 +166,36 @@ await record(
     },
 );
 
-// 4. index.ts (extension entry) — parses; subagent_stop delegates to the shared stopRun.
+// 4. tools.model-facing — the REGISTERED tool handlers, built by the same
+// factories index.ts passes to pi.registerTool, against a real dismissed run.
+await record(
+    "tools.model-facing",
+    "node docs/tests/issue-44-runtime-smoke.mjs",
+    async () => {
+        const id = trackDisk(`sa_smoke44_tool_${Date.now()}`);
+        const pid = spawnSleeper();
+        writeMeta(baseMeta({ id, status: "running", pid }));
+        dismissRun(id);
+        let stopped = 0;
+        const tools = {
+            list: subagentListTool(TypeStub),
+            output: subagentOutputTool(TypeStub),
+            result: subagentResultTool(TypeStub),
+            stop: subagentStopTool(TypeStub, { onStopped: () => stopped++ }),
+        };
+        const outText = (r) => r.content[0].text;
+        check(outText(await tools.list.execute("tc", {})).includes(id), "subagent_list must include the dismissed run");
+        check(outText(await tools.output.execute("tc", { id })).startsWith(`[${id} · running`), "subagent_output must resolve the dismissed run");
+        check(outText(await tools.result.execute("tc", { id })).includes("still running"), "subagent_result must give the non-blocking running reply");
+        check(outText(await tools.stop.execute("tc", { id })).includes(`Stopped subagent ${id}`), "subagent_stop must stop the dismissed run");
+        check(stopped === 1, "stop handler must fire its onStopped callback once");
+        check(readMeta(id).status === "killed" && isDismissed(readMeta(id)), "killed + dismissed must persist after the stop");
+        check(await waitFor(() => !processExists(pid)), `process group of pid ${pid} must be gone`);
+        return "factory-built handlers (the exact objects pi.registerTool receives): dismissed run listed/output/result-ed by id, stopped via subagent_stop with onStopped fired; killed+dismissed persisted; group gone";
+    },
+);
+
+// 5. index.ts (extension entry) — parses; subagent_stop delegates to the shared stopRun.
 await record(
     "index.ts (extension entry)",
     "node --experimental-strip-types --check index.ts",
