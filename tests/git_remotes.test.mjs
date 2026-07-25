@@ -294,6 +294,104 @@ describe("git_remotes.sync", () => {
 
     // @covers git_remotes.sync
     // @level unit
+    // @fails-without-fix git_remotes.sync
+    it("replaces a multi-stale pushurl set with the multi-desired set and pushes only to desired destinations", () => {
+        // Regression: `git remote set-url --push <name> <url>` is rejected when the
+        // target already has multiple pushurl values ("has multiple values; fatal:
+        // could not set ..."). Sync must clear the complete existing pushurl set
+        // before rebuilding the desired ordered set — not attempt a single set-url.
+        const base = mkdtempSync(join(tmpdir(), "pi-remotes-multi-stale-"));
+        try {
+            const fetchRemote = join(base, "fetch.git");
+            const desired1 = join(base, "desired-a.git");
+            const desired2 = join(base, "desired-b.git");
+            const stale1 = join(base, "stale-a.git");
+            const stale2 = join(base, "stale-b.git");
+            initBare(fetchRemote);
+            initBare(desired1);
+            initBare(desired2);
+            initBare(stale1);
+            initBare(stale2);
+
+            const source = initRepo(join(base, "source"));
+            runGit(source, ["remote", "add", "origin", fetchRemote]);
+            runGit(source, ["remote", "set-url", "--push", "origin", desired1]);
+            runGit(source, ["remote", "set-url", "--add", "--push", "origin", desired2]);
+            runGit(source, ["push", "origin", "HEAD"]);
+
+            // Path-style clone carries origin → source working tree. Configure TWO
+            // stale pushurls so the target push set is multi-valued before sync.
+            const target = cloneWithIdentity(base, source, "clone");
+            runGit(target, ["remote", "set-url", "--push", "origin", stale1]);
+            runGit(target, ["remote", "set-url", "--add", "--push", "origin", stale2]);
+            assert.equal(
+                pushUrlsAll(target, "origin").length,
+                2,
+                "fixture must start with two stale pushurls (the multi-value case git rejects)",
+            );
+
+            // Must not throw: previously `set-url --push` fatals on multi-valued pushurl.
+            syncGitRemotes(source, target);
+
+            const origin = readGitRemotes(target).find((r) => r.name === "origin");
+            assert.ok(origin, "origin must remain after sync");
+            assert.equal(real(origin.url), real(fetchRemote), "fetch URL must match source");
+            assert.equal(
+                origin.pushUrls.length,
+                2,
+                "both desired pushurls must be present after clearing multi-stale set",
+            );
+            assert.deepEqual(
+                origin.pushUrls.map(real).sort(),
+                [real(desired1), real(desired2)].sort(),
+                "stale push destinations must be fully replaced by the desired set",
+            );
+            assert.deepEqual(
+                pushUrlsAll(target, "origin").map(real).sort(),
+                [real(desired1), real(desired2)].sort(),
+                "git remote get-url --push --all must list only the desired destinations",
+            );
+
+            // Behavioral proof: push from the synced target reaches every desired
+            // destination and does NOT target any stale destination.
+            runGit(target, ["checkout", "-b", "multi-stale-proof"]);
+            writeFileSync(join(target, "proof.txt"), "multi-stale-proof\n");
+            runGit(target, ["add", "proof.txt"]);
+            runGit(target, ["commit", "-m", "multi-stale-proof"]);
+            runGit(target, ["push", "-u", "origin", "multi-stale-proof"]);
+
+            assert.match(
+                branchList(desired1, "multi-stale-proof"),
+                /multi-stale-proof/,
+                "push must land on first desired pushurl",
+            );
+            assert.match(
+                branchList(desired2, "multi-stale-proof"),
+                /multi-stale-proof/,
+                "push must land on second desired pushurl",
+            );
+            assert.equal(
+                branchList(stale1, "multi-stale-proof"),
+                "",
+                "push must not land on first stale pushurl",
+            );
+            assert.equal(
+                branchList(stale2, "multi-stale-proof"),
+                "",
+                "push must not land on second stale pushurl",
+            );
+            assert.equal(
+                branchList(fetchRemote, "multi-stale-proof"),
+                "",
+                "push must not land on the fetch-only remote when explicit pushurls exist",
+            );
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    // @covers git_remotes.sync
+    // @level unit
     it("preserves multiple remotes independently and removes stale clone-only remotes", () => {
         const base = mkdtempSync(join(tmpdir(), "pi-remotes-multi-remote-"));
         try {

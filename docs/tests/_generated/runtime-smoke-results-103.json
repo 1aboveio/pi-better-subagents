@@ -1,21 +1,21 @@
 {
   "unit": "#103",
-  "headNote": "exact HEAD after checklist commit; smoke observed pre-stamp on same tree semantics",
+  "headNote": "exact HEAD after multi-stale pushurl fix; smoke observed on same tree semantics",
   "results": [
     {
       "surface": "git_remotes.read",
       "kind": "library",
       "status": "pass",
-      "command": "node --experimental-strip-types -e '<inline multi-pushurl read+sync+push smoke>'",
-      "observed": "SMOKE PASS: git_remotes multi-pushurl read+sync+push reached both destinations"
+      "command": "node --experimental-strip-types -e '<inline multi-stale→multi-desired read+sync+push smoke>'",
+      "observed": "SMOKE PASS: multi-stale→multi-desired clear+rebuild; push reached both desired, neither stale"
     },
     {
       "surface": "git_remotes.sync",
       "kind": "library",
       "status": "pass",
-      "command": "node --experimental-strip-types -e '<inline multi-pushurl read+sync+push smoke>'",
-      "observed": "SMOKE PASS: git_remotes multi-pushurl read+sync+push reached both destinations; push1 and push2 both received branch smoke"
+      "command": "node --experimental-strip-types -e '<inline multi-stale→multi-desired read+sync+push smoke>'",
+      "observed": "SMOKE PASS: multi-stale→multi-desired clear+rebuild; push reached both desired, neither stale; desired-a and desired-b both received branch smoke-multi-stale; stale-a/stale-b/fetch empty"
     }
   ],
-  "headSha": "3522c75e51d286683211b661eb25cfe121f77a05"
+  "headSha": "b8151619a6f5f6d68f7b968cd800288b31980c65"
 }

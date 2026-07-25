@@ -142,10 +142,13 @@ export function syncGitRemotes(sourceDir: string, targetDir: string): void {
 /**
  * Replace the target remote's push URL set with `desired`.
  *
- * Git has no "set all pushurls" primitive: the first `set-url --push` replaces
- * the entire push set with one URL; subsequent `--add --push` append. When the
- * desired set is empty, every existing pushurl is deleted so push falls back
- * to the fetch URL.
+ * Git has no "set all pushurls" primitive. Critically, `git remote set-url
+ * --push <name> <url>` is rejected when the target already has multiple
+ * pushurl values (`warning: remote.<name>.pushurl has multiple values;
+ * fatal: could not set ...`). Always clear the complete existing pushurl
+ * set first, then rebuild the desired ordered set with set-url + --add.
+ * When the desired set is empty, every existing pushurl is deleted so push
+ * falls back to the fetch URL.
  */
 function applyPushUrls(
     dir: string,
@@ -153,35 +156,7 @@ function applyPushUrls(
     desired: string[],
     existing: string[],
 ): void {
-    if (desired.length === 0) {
-        // Clear every leftover pushurl so Git's default (push → fetch URL) holds.
-        for (const url of existing) {
-            try {
-                runGit(dir, ["remote", "set-url", "--push", "--delete", name, url]);
-            } catch {
-                // Older Git / already-removed entry: ignore and continue.
-            }
-        }
-        // If anything remains (e.g. --delete unsupported), force push URL = fetch URL
-        // by reading the fetch URL and setting a single matching push URL, then
-        // only if push still differs. Prefer leaving Git default when possible.
-        const remaining = safePushUrlsAll(dir, name);
-        const fetchUrl = safeFetchUrl(dir, name);
-        if (remaining.length > 0 && fetchUrl) {
-            // Replace multi-set with fetch URL (semantically equivalent to no pushurl
-            // for push destination purposes when only one URL remains equal to fetch).
-            runGit(dir, ["remote", "set-url", "--push", name, fetchUrl]);
-            // If Git still lists a distinct pushurl equal to fetch, try delete once.
-            try {
-                runGit(dir, ["remote", "set-url", "--push", "--delete", name, fetchUrl]);
-            } catch {
-                // Accept pushurl == fetch as default-equivalent.
-            }
-        }
-        return;
-    }
-
-    // Fast path: already identical in order.
+    // Fast path: already identical in order — nothing to do (desired empty or not).
     if (
         existing.length === desired.length &&
         existing.every((url, i) => url === desired[i])
@@ -189,10 +164,82 @@ function applyPushUrls(
         return;
     }
 
-    // Replace: first set-url --push replaces the whole push set; then add the rest.
+    // Always clear the complete existing pushurl set first. A bare
+    // `set-url --push` cannot replace a multi-valued set (Git fatals).
+    clearAllPushUrls(dir, name, existing);
+
+    if (desired.length === 0) {
+        // Desired is empty: after clear, Git's default (push → fetch URL) holds.
+        // If anything remains (e.g. --delete unsupported), force default-equivalent.
+        const remaining = safePushUrlsAll(dir, name);
+        const fetchUrl = safeFetchUrl(dir, name);
+        if (remaining.length > 0 && fetchUrl) {
+            // Remaining multi-set still cannot take a plain set-url --push; delete
+            // each leftover first, then (if needed) set once equal to fetch.
+            clearAllPushUrls(dir, name, remaining);
+            const still = safePushUrlsAll(dir, name);
+            if (still.length === 1 && still[0] !== fetchUrl) {
+                runGit(dir, ["remote", "set-url", "--push", name, fetchUrl]);
+            } else if (still.length === 0) {
+                // Clean default — nothing to do.
+            } else if (still.length === 1 && still[0] === fetchUrl) {
+                // pushurl == fetch is default-equivalent; try delete once.
+                try {
+                    runGit(dir, ["remote", "set-url", "--push", "--delete", name, fetchUrl]);
+                } catch {
+                    // Accept pushurl == fetch as default-equivalent.
+                }
+            } else if (still.length > 1) {
+                // Last resort: set-url still fails on multi; leave as-is only if
+                // every entry already equals fetch (unusual). Otherwise throw so
+                // callers do not silently keep stale destinations.
+                const allFetch = still.every((u) => u === fetchUrl);
+                if (!allFetch) {
+                    throw new Error(
+                        `unable to clear multi-valued remote.${name}.pushurl in ${dir}`,
+                    );
+                }
+            }
+        }
+        return;
+    }
+
+    // Rebuild desired ordered set: first set-url --push, then --add --push.
+    // Safe now because the multi-valued set was cleared above.
     runGit(dir, ["remote", "set-url", "--push", name, desired[0]]);
     for (let i = 1; i < desired.length; i++) {
         runGit(dir, ["remote", "set-url", "--add", "--push", name, desired[i]]);
+    }
+}
+
+/** Delete every known pushurl for `name`. Tolerates already-removed entries. */
+function clearAllPushUrls(dir: string, name: string, urls: string[]): void {
+    // Prefer the live multi-value list so we do not miss entries `existing`
+    // was stale relative to (or duplicates). Fall back to the provided list.
+    const live = safePushUrlsAll(dir, name);
+    const toClear = live.length > 0 ? live : urls;
+    for (const url of toClear) {
+        try {
+            runGit(dir, ["remote", "set-url", "--push", "--delete", name, url]);
+        } catch {
+            // Older Git / already-removed entry: ignore and continue.
+        }
+    }
+    // If --delete matched by value left siblings (duplicate values), sweep again
+    // from a fresh read until empty or no progress.
+    for (let guard = 0; guard < 16; guard++) {
+        const remaining = safePushUrlsAll(dir, name);
+        if (remaining.length === 0) return;
+        let deleted = 0;
+        for (const url of remaining) {
+            try {
+                runGit(dir, ["remote", "set-url", "--push", "--delete", name, url]);
+                deleted++;
+            } catch {
+                // ignore
+            }
+        }
+        if (deleted === 0) return;
     }
 }
 
