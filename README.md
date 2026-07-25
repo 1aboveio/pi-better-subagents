@@ -156,12 +156,12 @@ Real integration smoke tests live in [`tests/`](tests/) — a subagent using
 
 ## Roadmap
 
-Tracked in [issues](https://github.com/exoulster/pi-better-subagents/issues).
+Tracked in [issues](https://github.com/1aboveio/pi-better-subagents/issues).
 Near-term:
 
 - Guarantee subagent autonomy — verify/deny any child→parent supervision
-  back-channel so a child can never block on the parent ([#1](https://github.com/exoulster/pi-better-subagents/issues/1)).
+  back-channel so a child can never block on the parent ([#1](https://github.com/1aboveio/pi-better-subagents/issues/1)).
 - Make `callback:true` a lightweight trigger instead of embedding the full result
-  twice ([#2](https://github.com/exoulster/pi-better-subagents/issues/2)) — **done**.
+  twice ([#2](https://github.com/1aboveio/pi-better-subagents/issues/2)) — **done**.
 - Named agent-definition files (per-agent system prompt + tool allowlist) and
   chain/parallel orchestration.
