@@ -1,0 +1,1 @@
+Independent review round 2 fixes on ce1dc9b: preserve remote pushurl (not only fetch URL); explicit named-branch checkout lands on symbolic branch; linked-worktree fail-fast exercised through live subagent_spawn without reaching spawn marker. Rebased onto current origin/main.
