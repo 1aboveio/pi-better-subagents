@@ -32,7 +32,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch'
       || startsWith(github.head_ref, 'mergify/merge-queue/')
-    # macOS until https://github.com/exoulster/pi-better-subagents/issues/5
+    # macOS until https://github.com/1aboveio/pi-better-subagents/issues/5
     # (Linux sandbox). The queue suite itself (web_fetch + gh) does not need
     # sandbox-exec, but staying on macOS keeps full run_all.sh available later.
     runs-on: macos-latest
