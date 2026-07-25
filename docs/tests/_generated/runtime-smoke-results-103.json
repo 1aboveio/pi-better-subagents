@@ -17,5 +17,5 @@
       "observed": "SMOKE PASS: multi-stale→multi-desired clear+rebuild; push reached both desired, neither stale; desired-a and desired-b both received branch smoke-multi-stale; stale-a/stale-b/fetch empty"
     }
   ],
-  "headSha": "b8151619a6f5f6d68f7b968cd800288b31980c65"
+  "headSha": "8d8c1d1c61b1c531dbcdcd9c55a33f55fc1daf9c"
 }
