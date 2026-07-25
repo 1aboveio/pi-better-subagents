@@ -19,7 +19,7 @@ import { spawnDetached, killProcessTree } from "./spawn.ts";
 import { parseRun, type Usage } from "./parse.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
-import { buildSandboxCommand, sandboxSupported } from "./sandbox.ts";
+import { maybeBuildSandboxCommand } from "./sandbox.ts";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -292,14 +292,9 @@ export default function (pi: ExtensionAPI) {
             // the confinement + working dir elsewhere. Self-contained confinement
             // via the OS — no dependency on any guardrails extension.
             const explicitSandbox = p.sandbox === true || typeof p.sandbox_dir === "string";
-            let wantSandbox = p.sandbox !== false; // default on
-            if (wantSandbox && !sandboxSupported()) {
-                // Requested-but-unsupported is an error; default-on just degrades.
-                if (explicitSandbox) throw new Error("sandbox is only supported on macOS (sandbox-exec). Pass sandbox:false on this platform.");
-                wantSandbox = false;
-            }
+            const sandboxEnabled = p.sandbox !== false; // default on
             const cwd = p.sandbox_dir ?? p.cwd ?? ctx.cwd;
-            const sandboxDir = wantSandbox ? (p.sandbox_dir ?? cwd) : undefined;
+            const requestedSandboxDir = sandboxEnabled ? (p.sandbox_dir ?? cwd) : undefined;
             // Model precedence: per-call > config default > inherit foreground.
             const model = p.model ?? cfg.defaultModel ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
 
@@ -307,7 +302,7 @@ export default function (pi: ExtensionAPI) {
             // bleed. Bounded and deliberate, per the design's continuity rule.
             mkdirSync(sessionsDir(), { recursive: true });
             mkdirSync(runDir(id), { recursive: true });
-            if (sandboxDir) mkdirSync(sandboxDir, { recursive: true });
+            if (requestedSandboxDir) mkdirSync(requestedSandboxDir, { recursive: true });
             writeFileSync(promptPathFor(id), p.prompt);
 
             // `clean:true` is a hermetic builtins-only child — now just the
@@ -374,14 +369,17 @@ export default function (pi: ExtensionAPI) {
             ];
 
             const piBin = resolvePiBinary();
-            // Route through sandbox-exec when confinement is requested; otherwise
-            // exec pi directly.
-            const cmd = sandboxDir
-                ? buildSandboxCommand({
+            // The policy helper degrades only when no backend was discovered. Once
+            // it selects bubblewrap or sandbox-exec, this exact wrapper is spawned
+            // and any runtime failure remains fail-closed (no direct retry).
+            const sandboxCommand = requestedSandboxDir
+                ? maybeBuildSandboxCommand({
                     profilePath: join(runDir(id), "sandbox.sb"),
-                    writableDir: sandboxDir, home: homedir(), piBin, piArgs: args,
-                })
-                : { file: piBin, fileArgs: args };
+                    writableDir: requestedSandboxDir, home: homedir(), piBin, piArgs: args,
+                }, { sandboxEnabled, explicitSandbox })
+                : undefined;
+            const cmd = sandboxCommand ?? { file: piBin, fileArgs: args };
+            const sandboxDir = sandboxCommand ? requestedSandboxDir : undefined;
 
             const spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id) });
 
