@@ -9,11 +9,12 @@
  *
  * Backends are selected here so callers retain a platform-neutral support query
  * and command-wrapper contract. Linux support adds a backend without changing
- * the detached spawning policy in the extension.
+ * detached spawning policy in the extension.
  */
 
 import { platform } from "node:os";
-import { realpathSync, writeFileSync } from "node:fs";
+import { accessSync, constants, realpathSync, statSync, writeFileSync } from "node:fs";
+import { delimiter, resolve } from "node:path";
 
 type SandboxCommandArgs = {
     profilePath: string;
@@ -27,6 +28,11 @@ type SandboxCommand = { file: string; fileArgs: string[] };
 
 type SandboxBackend = {
     buildCommand(args: SandboxCommandArgs): SandboxCommand;
+};
+
+type SandboxRequest = {
+    sandboxEnabled: boolean;
+    explicitSandbox: boolean;
 };
 
 /** Quote a path as an SBPL string literal. */
@@ -64,9 +70,64 @@ const macOSSandboxBackend: SandboxBackend = {
     buildCommand: buildMacOSSandboxCommand,
 };
 
-function selectedSandboxBackend(): SandboxBackend | undefined {
-    if (platform() === "darwin") return macOSSandboxBackend;
+/** Resolve an executable from PATH without starting it or probing namespaces. */
+function executableFromPath(name: string): string | undefined {
+    const path = process.env.PATH;
+    if (!path) return undefined;
+
+    for (const entry of path.split(delimiter)) {
+        const candidate = resolve(entry || ".", name);
+        try {
+            if (!statSync(candidate).isFile()) continue;
+            accessSync(candidate, constants.X_OK);
+            return candidate;
+        } catch {
+            // A PATH entry may disappear or be inaccessible between lookup and use.
+        }
+    }
     return undefined;
+}
+
+function buildLinuxSandboxCommand(bwrap: string, args: SandboxCommandArgs): SandboxCommand {
+    // The caller creates the selected work directory before it reaches this
+    // boundary. Canonicalizing it before bind-mounting keeps symlink aliases from
+    // widening the writable root.
+    const dir = realpathSync(args.writableDir);
+    return {
+        file: bwrap,
+        fileArgs: [
+            "--ro-bind", "/", "/",
+            "--bind", dir, dir,
+            "--bind", "/tmp", "/tmp",
+            "--dev", "/dev",
+            "--",
+            args.piBin, ...args.piArgs,
+        ],
+    };
+}
+
+function linuxSandboxBackend(): SandboxBackend | undefined {
+    const bwrap = executableFromPath("bwrap");
+    if (!bwrap) return undefined;
+    return { buildCommand: (args) => buildLinuxSandboxCommand(bwrap, args) };
+}
+
+function selectedSandboxBackend(): SandboxBackend | undefined {
+    const currentPlatform = platform();
+    if (currentPlatform === "darwin") return macOSSandboxBackend;
+    if (currentPlatform === "linux") return linuxSandboxBackend();
+    return undefined;
+}
+
+function sandboxUnavailableMessage(): string {
+    const currentPlatform = platform();
+    if (currentPlatform === "linux") {
+        return "Linux sandbox requires executable bubblewrap (bwrap) on PATH. Install bubblewrap or pass sandbox:false.";
+    }
+    if (currentPlatform === "darwin") {
+        return "macOS sandbox requires /usr/bin/sandbox-exec. Pass sandbox:false if it is unavailable.";
+    }
+    return `sandbox is unsupported on ${currentPlatform}. Pass sandbox:false on this platform.`;
 }
 
 /** True when an OS write-sandbox backend can be applied on this platform. */
@@ -75,10 +136,28 @@ export function sandboxSupported(): boolean {
 }
 
 /**
+ * Resolve the caller's default-on, explicit-request, and opt-out policy before
+ * spawning. A selected backend always returns its wrapper; callers never retry
+ * the child directly when that wrapper exits or cannot initialize.
+ */
+export function maybeBuildSandboxCommand(
+    args: SandboxCommandArgs,
+    request: SandboxRequest,
+): SandboxCommand | undefined {
+    if (!request.sandboxEnabled) return undefined;
+
+    const backend = selectedSandboxBackend();
+    if (!backend) {
+        if (request.explicitSandbox) throw new Error(sandboxUnavailableMessage());
+        return undefined;
+    }
+    return backend.buildCommand(args);
+}
+
+/**
  * Return the selected backend's executable and ordered argv wrapper around pi.
- * Callers first use sandboxSupported() to preserve the unsupported-platform
- * default-degrade and explicit-request policy. The fallback preserves the
- * pre-existing direct-call result for callers that do not perform that check.
+ * The fallback preserves the pre-existing direct-call result for callers that
+ * bypass the request-policy helper above.
  */
 export function buildSandboxCommand(args: SandboxCommandArgs): SandboxCommand {
     return (selectedSandboxBackend() ?? macOSSandboxBackend).buildCommand(args);
