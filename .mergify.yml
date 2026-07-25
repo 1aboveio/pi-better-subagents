@@ -76,9 +76,12 @@ priority_rules:
     conditions:
       - label = urgent
     priority: high
+    # Mergify flipped this default true -> false on 2026-07-01. Set explicitly:
+    # an urgent PR cancels the in-flight checks of the batch it jumps ahead of,
+    # rather than waiting for that batch's `integration` run to finish.
+    allow_checks_interruption: true
 
 # Escape hatch 2: skip the queue entirely (break glass).
-    allow_checks_interruption: true
 pull_request_rules:
   - name: emergency merge — skips the queue, use only when the queue cannot run
     conditions:
