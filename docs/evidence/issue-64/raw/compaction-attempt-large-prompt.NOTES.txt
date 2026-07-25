@@ -1,0 +1,7 @@
+Attempt: PI_CODING_AGENT_DIR with compaction.reserveTokens=1000000, keepRecentTokens=200,
+print-mode `pi -p --mode json` on MiniMax-M3 with ~24k-token prompt.
+Result: completed normally with agent_end/agent_settled; NO compaction_start/compaction_end.
+Model contextWindow observed via RPC get_state: 512000, so threshold auto-compact
+(contextTokens > contextWindow - reserveTokens) is impractical for this model in a short discovery run.
+See redacted/compaction-attempt-large-prompt.skeleton.ndjson for lifecycle skeleton and
+fixtures/compaction-rpc-manual.ndjson for explicit compaction_* signatures via RPC manual compact.
