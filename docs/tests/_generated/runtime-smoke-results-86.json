@@ -19,7 +19,7 @@
       "kind": "library",
       "status": "pass",
       "command": "node --experimental-strip-types tests/smoke_midturn_exit.mjs",
-      "observed": "real parseRunForLifecycle inside finalizeRun exposed unmatched bash tool start and sawEnd=false for the mid-turn log; full-stream structural scan owns top-level lifecycle fields only and fails closed on unfinished/malformed records without retaining payloads"
+      "observed": "real parseRunForLifecycle inside finalizeRun exposed unmatched bash tool start and sawEnd=false for the mid-turn log; full-stream grammar-validating scan owns top-level lifecycle fields only after complete JSON grammar validity and fails closed on unfinished/malformed records (trailing commas, invalid primitives/escapes, mismatched delimiters) without retaining payloads"
     },
     {
       "surface": "subagent.completion-callback",
@@ -41,5 +41,8 @@
   },
   "round4": {
     "notes": "Structural lifecycle scanner authority: truncated early-type EOF and nested-type ordering fail closed via finalizeRun/buildSubagentResultText regressions; valid oversized top-level late-type remains complete; tight-heap large nl-free scan preserved."
+  },
+  "round5": {
+    "notes": "Complete JSON grammar authority: oversized trailing-comma agent_end and malformed tool_execution_end fail closed in scanner + finalize/result integration; valid oversized lifecycle events still complete."
   }
 }

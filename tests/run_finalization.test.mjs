@@ -548,6 +548,112 @@ describe("finalizeRun integration", () => {
     // @covers subagent.run-finalization
     // @level integration
     // @fails-without-fix subagent.run-finalization
+    it("fails closed on closed oversized agent_end with trailing comma (invalid JSON)", () => {
+        const id = `sa_finalize_trail_comma_${process.pid}_${Date.now()}`;
+        const messages = [];
+        mkdirSync(runDir(id), { recursive: true });
+        const fd = openSync(logPathFor(id), "w");
+        try {
+            // Reviewer counterexample: closed oversized agent_end with trailing comma is
+            // invalid JSON and must never finalize as clean completion.
+            writeSync(fd, `{"type":"agent_end","payload":"`);
+            writeSync(fd, Buffer.alloc(LIFECYCLE_RECORD_PREFIX_BYTES + 2048, 0x78));
+            writeSync(fd, `",}\n`);
+        } finally {
+            closeSync(fd);
+        }
+        seedRunningMeta(id);
+
+        try {
+            const result = finalizeRun(id, 0, {
+                renderWidget: () => {},
+                notify: () => {},
+                sendMessage: (message, options) => messages.push({ message, options }),
+            });
+
+            assert.equal(result.applied, true);
+            assert.equal(result.outcome?.status, "failed");
+            assert.equal(result.outcome?.incomplete, true);
+            assert.equal(result.outcome?.classification, "incomplete_no_terminal_event");
+            assert.equal(result.outcome?.diagnostics.sawTerminalEvent, false);
+
+            const persisted = readMeta(id);
+            assert.equal(persisted?.status, "failed");
+            assert.equal(persisted?.failureReason, "incomplete-stream");
+            assert.equal(persisted?.lifecycleClassification, "incomplete_no_terminal_event");
+
+            assert.match(messages[0].message.content, /ATTENTION/i);
+            assert.match(messages[0].message.content, /lifecycle incomplete_no_terminal_event/);
+
+            const rendered = buildSubagentResultText(id);
+            assert.ok(rendered);
+            assert.match(rendered, /lifecycle incomplete_no_terminal_event/);
+            assert.doesNotMatch(rendered, /lifecycle complete/);
+        } finally {
+            rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
+
+    // @covers subagent.run-finalization
+    // @level integration
+    // @fails-without-fix subagent.run-finalization
+    it("does not let malformed tool_execution_end balance an open tool into clean completion", () => {
+        const id = `sa_finalize_bad_tool_end_${process.pid}_${Date.now()}`;
+        const messages = [];
+        writeRunLog(id, []);
+        // Valid open tool, then malformed end (trailing comma), then a terminal-looking event.
+        writeFileSync(
+            logPathFor(id),
+            [
+                JSON.stringify({
+                    type: "tool_execution_start",
+                    toolCallId: "call_bash",
+                    toolName: "bash",
+                }),
+                `{"type":"tool_execution_end","toolCallId":"call_bash",}`,
+                JSON.stringify({
+                    type: "agent_end",
+                    messages: [{ role: "assistant", content: "Final answer" }],
+                }),
+                "",
+            ].join("\n"),
+        );
+        seedRunningMeta(id);
+
+        try {
+            const result = finalizeRun(id, 0, {
+                renderWidget: () => {},
+                notify: () => {},
+                sendMessage: (message, options) => messages.push({ message, options }),
+            });
+
+            assert.equal(result.applied, true);
+            assert.equal(result.outcome?.status, "failed");
+            assert.equal(result.outcome?.incomplete, true);
+            // Stream is untrusted after malformed record; terminal authority is cleared.
+            assert.equal(result.outcome?.classification, "incomplete_no_terminal_event");
+            assert.equal(result.outcome?.diagnostics.sawTerminalEvent, false);
+
+            const persisted = readMeta(id);
+            assert.equal(persisted?.status, "failed");
+            assert.equal(persisted?.failureReason, "incomplete-stream");
+            assert.notEqual(persisted?.lifecycleClassification, "complete");
+
+            assert.match(messages[0].message.content, /ATTENTION/i);
+            assert.doesNotMatch(messages[0].message.content, /lifecycle complete/);
+
+            const rendered = buildSubagentResultText(id);
+            assert.ok(rendered);
+            assert.doesNotMatch(rendered, /lifecycle complete/);
+            assert.match(rendered, /lifecycle incomplete/);
+        } finally {
+            rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
+
+    // @covers subagent.run-finalization
+    // @level integration
+    // @fails-without-fix subagent.run-finalization
     it("detects unmatched tool start from a large newline-free record before a terminal tail event", () => {
         const id = `sa_finalize_large_tool_${process.pid}_${Date.now()}`;
         const messages = [];

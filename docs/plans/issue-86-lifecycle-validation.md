@@ -53,12 +53,24 @@ Narrowed after human-approved BREAKER SPLIT on theme `lifecycle-validation-autho
 - [done] Scanner regressions: truncated early-type EOF fail-closed; nested `agent_end` before top-level `message_end` ignored; late top-level type still complete; large nl-free + unmatched tool cases preserved.
 - [done] Real `finalizeRun` / `buildSubagentResultText` regressions for truncated early-type EOF and nested-type ordering never produce clean completion.
 
+## Round-5 / split-scope fix (complete JSON grammar authority)
+
+Continues human-approved structural lifecycle scanner authority split:
+
+- [done] `scanLifecycleEvidence` validates complete JSON grammar with bounded streaming state before applying top-level lifecycle fields (not depth-only structural closure).
+- [done] Fail closed on trailing commas, mismatched delimiters, invalid primitive syntax (`tru`, leading-zero numbers), invalid string escapes, and unfinished/truncated records.
+- [done] Malformed closed oversized `agent_end` (e.g. trailing comma after large payload) never sets `sawEnd` / never finalizes as `complete`.
+- [done] Malformed `tool_execution_end` never balances a valid open tool; any malformed record marks the stream untrusted (`complete:false`) and clears terminal lifecycle authority.
+- [done] Valid oversized top-level lifecycle events still classify correctly without payload retention.
+- [done] Scanner regressions: trailing-comma oversized agent_end; malformed tool_execution_end; invalid primitives/escapes/mismatched delimiters.
+- [done] Real `finalizeRun` / `buildSubagentResultText` regressions for trailing-comma agent_end and malformed tool_execution_end never produce clean completion.
+
 ## Contract matrix (`lifecycle-validation-authority` × `subagent_lifecycle_result`)
 
 | state | proof |
 |---|---|
 | `legacy_completed_metadata` | `tests/incomplete_result.test.mjs` :: legacy completed without stream evidence; `tests/run_finalization.test.mjs` :: reclassifies legacy completed metadata when unmatched tools are outside the parse window |
-| `fresh_finalization` | `tests/run_finalization.test.mjs` :: finalizeRun integration (incomplete / complete / failed_exit / truncated unmatched-tool window / large newline-free complete / truncated early-type EOF fail-closed / nested-type ordering fail-closed / large unmatched tool) |
+| `fresh_finalization` | `tests/run_finalization.test.mjs` :: finalizeRun integration (incomplete / complete / failed_exit / truncated unmatched-tool window / large newline-free complete / truncated early-type EOF fail-closed / nested-type ordering fail-closed / trailing-comma malformed agent_end fail-closed / malformed tool_execution_end fail-closed / large unmatched tool) |
 | `result_formatting` | `tests/incomplete_result.test.mjs` + `buildSubagentResultText` in finalizeRun integration (including truncated-window + large-record + structural fail-closed bodies) |
 | `callback_notification` | finalizeRun integration asserts ATTENTION + lifecycle label for incomplete (incl. truncated unmatched tools + truncated early-type + nested-type + open-tools); `tests/callback_completion.test.mjs` |
 
@@ -71,6 +83,9 @@ Adjacent members checked under the same contract (round-4 split-scope structural
 | single very large newline-free event | parse_run large nl-free + finalize large nl-free complete |
 | truncated early-type EOF fails closed | parse_run + finalize truncated early-type (`complete:false`, no sawEnd) |
 | nested type before real top-level type ignored | parse_run nested-type ownership + finalize nested message_end incomplete |
+| closed oversized trailing-comma agent_end fails closed | parse_run + finalize trailing-comma malformed agent_end (`complete:false`, no sawEnd) |
+| malformed tool_execution_end never balances open tool | parse_run + finalize malformed tool end (no clean completion; stream untrusted) |
+| invalid primitives/escapes/mismatched delimiters fail closed | parse_run invalid grammar matrix |
 | late top-level type on oversized valid record | parse_run late-type complete |
 | normal coherent completion remains complete | finalize complete + large nl-free complete |
 | killed and nonzero-exit remain distinct | incomplete_result killed; finalize failed_exit |
@@ -83,3 +98,4 @@ Adjacent members checked under the same contract (round-4 split-scope structural
 - [done] Slice D: round-1 blockers — legacy evidence authority + real finalization integration.
 - [done] Slice E: round-2/3 blockers — complete-stream authority + bounded newline-free record scanning.
 - [done] Slice F: round-4 split-scope — structural lifecycle scanner authority (top-level ownership + malformed fail-closed).
+- [done] Slice G: round-5 split-scope — complete JSON grammar authority before lifecycle field application.

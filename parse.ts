@@ -197,7 +197,7 @@ export const LIFECYCLE_SCAN_CHUNK_BYTES = 64 * 1024;
 /**
  * Historical per-record prefix bound used by fixtures/tests. The structural
  * scanner no longer retains a record prefix; it streams with O(1) state and
- * only keeps top-level lifecycle field values after structural validity.
+ * only keeps top-level lifecycle field values after complete JSON grammar validity.
  */
 export const LIFECYCLE_RECORD_PREFIX_BYTES = 4 * 1024;
 
@@ -237,28 +237,72 @@ function applyLifecycleFields(
     }
 }
 
-function unescapeJsonStringContent(raw: string): string {
+function unescapeJsonStringContent(raw: string): string | null {
     try {
         return JSON.parse(`"${raw}"`) as string;
     } catch {
-        return raw;
+        return null;
     }
 }
 
+/** Fail closed on pathological nesting; keeps container-stack memory bounded. */
+const LIFECYCLE_JSON_MAX_DEPTH = 1024;
+
+type JsonContainer = "object" | "array";
 /**
- * Bounded structural NDJSON object scanner.
- * Tracks JSON nesting and top-level keys without retaining payloads. Lifecycle
- * fields are collected only for depth-1 keys and may be applied only after the
- * record returns to depth 0 (structurally valid).
+ * Grammar expectation inside the current container.
+ * - objectKeyOrEnd: after `{` — `"key"` or `}`
+ * - objectKey: after `,` in object — `"key"` required (trailing comma invalid)
+ * - objectColon: after key — `:`
+ * - value: expecting any JSON value
+ * - valueOrEnd: after `[` — value or `]`
+ * - commaOrEnd: after a value — `,` or container end
+ */
+type JsonExpect =
+    | "objectKeyOrEnd"
+    | "objectKey"
+    | "objectColon"
+    | "value"
+    | "valueOrEnd"
+    | "commaOrEnd";
+
+type NumberState =
+    | "start"
+    | "minus"
+    | "int"
+    | "intZero"
+    | "fracDot"
+    | "frac"
+    | "expE"
+    | "expSign"
+    | "expDigit";
+
+type PrimitiveKind = "true" | "false" | "null" | "number";
+
+/**
+ * Bounded streaming JSON-grammar scanner for one NDJSON object record.
+ * Validates complete JSON grammar (trailing commas, delimiter matching,
+ * primitives, escapes) without retaining payloads. Lifecycle fields are
+ * collected only for depth-1 keys and applied only after the whole record
+ * is grammar-valid.
  */
 interface StructuralRecordScan {
-    depth: number;
+    /** Stack of open containers; length is current depth. */
+    containers: JsonContainer[];
+    expect: JsonExpect;
     inString: boolean;
-    escape: boolean;
-    /** True while consuming a non-string primitive (number/true/false/null). */
+    /** True when the active string is an object key (not a value). */
+    stringIsKey: boolean;
+    /**
+     * Escape state inside a string:
+     * 0 = normal, 1 = saw backslash, 2..5 = collecting \uXXXX (2 + digitsSeen).
+     */
+    escapeMode: number;
     inPrimitive: boolean;
-    /** Top-level object parse expectation when depth === 1 and not in a string. */
-    expect: "key" | "colon" | "value" | "comma";
+    primitiveKind: PrimitiveKind | null;
+    /** Matched keyword length so far. */
+    primitiveIndex: number;
+    numberState: NumberState;
     started: boolean;
     finished: boolean;
     malformed: boolean;
@@ -275,11 +319,15 @@ interface StructuralRecordScan {
 
 function createStructuralRecordScan(): StructuralRecordScan {
     return {
-        depth: 0,
+        containers: [],
+        expect: "value",
         inString: false,
-        escape: false,
+        stringIsKey: false,
+        escapeMode: 0,
         inPrimitive: false,
-        expect: "key",
+        primitiveKind: null,
+        primitiveIndex: 0,
+        numberState: "start",
         started: false,
         finished: false,
         malformed: false,
@@ -292,90 +340,337 @@ function createStructuralRecordScan(): StructuralRecordScan {
     };
 }
 
+function depthOf(scan: StructuralRecordScan): number {
+    return scan.containers.length;
+}
+
+function markMalformed(scan: StructuralRecordScan): void {
+    scan.malformed = true;
+}
+
 function assignTopLevelLifecycleValue(scan: StructuralRecordScan): void {
     const key = scan.currentKey;
     if (!key || !LIFECYCLE_TOP_LEVEL_KEYS.has(key)) return;
     const value = unescapeJsonStringContent(scan.valueBuf);
+    if (value === null) {
+        markMalformed(scan);
+        return;
+    }
     if (key === "type") scan.type = value;
     else if (key === "toolCallId") scan.toolCallId = value;
     else if (key === "toolName") scan.toolName = value;
 }
 
+function appendCaptured(scan: StructuralRecordScan, chunk: string): void {
+    if (scan.capturingKey && scan.keyBuf.length < LIFECYCLE_FIELD_KEY_MAX_CHARS) {
+        scan.keyBuf += chunk;
+    } else if (scan.capturingValue && scan.valueBuf.length < LIFECYCLE_FIELD_VALUE_MAX_CHARS) {
+        scan.valueBuf += chunk;
+    }
+}
+
+function finishPrimitive(scan: StructuralRecordScan): boolean {
+    if (!scan.inPrimitive || !scan.primitiveKind) return false;
+    if (scan.primitiveKind === "number") {
+        // Number must end on a complete state (not after bare '-', '.', 'e', or sign).
+        if (
+            scan.numberState === "minus" ||
+            scan.numberState === "fracDot" ||
+            scan.numberState === "expE" ||
+            scan.numberState === "expSign" ||
+            scan.numberState === "start"
+        ) {
+            markMalformed(scan);
+            return false;
+        }
+    } else {
+        const expected =
+            scan.primitiveKind === "true" ? 4 : scan.primitiveKind === "false" ? 5 : 4;
+        if (scan.primitiveIndex !== expected) {
+            markMalformed(scan);
+            return false;
+        }
+    }
+    scan.inPrimitive = false;
+    scan.primitiveKind = null;
+    scan.primitiveIndex = 0;
+    scan.numberState = "start";
+    scan.expect = "commaOrEnd";
+    scan.currentKey = null;
+    return true;
+}
+
+function startPrimitive(scan: StructuralRecordScan, ch: string): void {
+    scan.inPrimitive = true;
+    scan.primitiveIndex = 1;
+    if (ch === "t") {
+        scan.primitiveKind = "true";
+        return;
+    }
+    if (ch === "f") {
+        scan.primitiveKind = "false";
+        return;
+    }
+    if (ch === "n") {
+        scan.primitiveKind = "null";
+        return;
+    }
+    // number
+    scan.primitiveKind = "number";
+    if (ch === "-") {
+        scan.numberState = "minus";
+        return;
+    }
+    if (ch === "0") {
+        scan.numberState = "intZero";
+        return;
+    }
+    if (ch >= "1" && ch <= "9") {
+        scan.numberState = "int";
+        return;
+    }
+    markMalformed(scan);
+}
+
+function feedPrimitiveChar(scan: StructuralRecordScan, ch: string): void {
+    if (!scan.primitiveKind) {
+        markMalformed(scan);
+        return;
+    }
+    if (scan.primitiveKind !== "number") {
+        const target =
+            scan.primitiveKind === "true" ? "true" : scan.primitiveKind === "false" ? "false" : "null";
+        if (scan.primitiveIndex >= target.length || ch !== target[scan.primitiveIndex]) {
+            markMalformed(scan);
+            return;
+        }
+        scan.primitiveIndex++;
+        return;
+    }
+
+    // Streaming number grammar (JSON).
+    switch (scan.numberState) {
+        case "minus":
+            if (ch === "0") {
+                scan.numberState = "intZero";
+                return;
+            }
+            if (ch >= "1" && ch <= "9") {
+                scan.numberState = "int";
+                return;
+            }
+            markMalformed(scan);
+            return;
+        case "intZero":
+            // Leading zero may only be followed by fraction/exponent, not more digits.
+            if (ch === ".") {
+                scan.numberState = "fracDot";
+                return;
+            }
+            if (ch === "e" || ch === "E") {
+                scan.numberState = "expE";
+                return;
+            }
+            markMalformed(scan);
+            return;
+        case "int":
+            if (ch >= "0" && ch <= "9") return;
+            if (ch === ".") {
+                scan.numberState = "fracDot";
+                return;
+            }
+            if (ch === "e" || ch === "E") {
+                scan.numberState = "expE";
+                return;
+            }
+            markMalformed(scan);
+            return;
+        case "fracDot":
+            if (ch >= "0" && ch <= "9") {
+                scan.numberState = "frac";
+                return;
+            }
+            markMalformed(scan);
+            return;
+        case "frac":
+            if (ch >= "0" && ch <= "9") return;
+            if (ch === "e" || ch === "E") {
+                scan.numberState = "expE";
+                return;
+            }
+            markMalformed(scan);
+            return;
+        case "expE":
+            if (ch === "+" || ch === "-") {
+                scan.numberState = "expSign";
+                return;
+            }
+            if (ch >= "0" && ch <= "9") {
+                scan.numberState = "expDigit";
+                return;
+            }
+            markMalformed(scan);
+            return;
+        case "expSign":
+            if (ch >= "0" && ch <= "9") {
+                scan.numberState = "expDigit";
+                return;
+            }
+            markMalformed(scan);
+            return;
+        case "expDigit":
+            if (ch >= "0" && ch <= "9") return;
+            markMalformed(scan);
+            return;
+        default:
+            markMalformed(scan);
+    }
+}
+
+function isValueStartChar(ch: string): boolean {
+    return (
+        ch === "\"" ||
+        ch === "{" ||
+        ch === "[" ||
+        ch === "t" ||
+        ch === "f" ||
+        ch === "n" ||
+        ch === "-" ||
+        (ch >= "0" && ch <= "9")
+    );
+}
+
+function canStartValue(scan: StructuralRecordScan): boolean {
+    return scan.expect === "value" || scan.expect === "valueOrEnd";
+}
+
+function afterValueClosed(scan: StructuralRecordScan): void {
+    scan.expect = "commaOrEnd";
+    scan.currentKey = null;
+}
+
+function pushContainer(scan: StructuralRecordScan, kind: JsonContainer): void {
+    if (scan.containers.length >= LIFECYCLE_JSON_MAX_DEPTH) {
+        markMalformed(scan);
+        return;
+    }
+    scan.containers.push(kind);
+    scan.expect = kind === "object" ? "objectKeyOrEnd" : "valueOrEnd";
+    scan.currentKey = null;
+}
+
+function popContainer(scan: StructuralRecordScan, kind: JsonContainer): void {
+    if (scan.containers.length === 0 || scan.containers[scan.containers.length - 1] !== kind) {
+        markMalformed(scan);
+        return;
+    }
+    scan.containers.pop();
+    if (scan.containers.length === 0) {
+        scan.finished = true;
+        scan.expect = "commaOrEnd";
+        return;
+    }
+    afterValueClosed(scan);
+}
+
 function feedStructuralRecordChar(scan: StructuralRecordScan, ch: string): void {
     if (scan.malformed || scan.finished || scan.skipLine) return;
 
+    // ── String body (including escape grammar) ─────────────────────────────
     if (scan.inString) {
-        if (scan.escape) {
-            if (scan.capturingKey && scan.keyBuf.length < LIFECYCLE_FIELD_KEY_MAX_CHARS) {
-                scan.keyBuf += `\\${ch}`;
-            } else if (scan.capturingValue && scan.valueBuf.length < LIFECYCLE_FIELD_VALUE_MAX_CHARS) {
-                scan.valueBuf += `\\${ch}`;
+        if (scan.escapeMode >= 2) {
+            // Collecting remaining \uXXXX hex digits (escapeMode = 2 + digitsSeen).
+            if (!/[0-9a-fA-F]/.test(ch)) {
+                markMalformed(scan);
+                return;
             }
-            scan.escape = false;
+            appendCaptured(scan, ch);
+            scan.escapeMode++;
+            // After 4 hex digits escapeMode reaches 6.
+            if (scan.escapeMode >= 6) scan.escapeMode = 0;
+            return;
+        }
+        if (scan.escapeMode === 1) {
+            // Character immediately after backslash.
+            if (ch === "u") {
+                appendCaptured(scan, "\\u");
+                scan.escapeMode = 2; // need 4 hex digits
+                return;
+            }
+            if (
+                ch === "\"" ||
+                ch === "\\" ||
+                ch === "/" ||
+                ch === "b" ||
+                ch === "f" ||
+                ch === "n" ||
+                ch === "r" ||
+                ch === "t"
+            ) {
+                appendCaptured(scan, `\\${ch}`);
+                scan.escapeMode = 0;
+                return;
+            }
+            markMalformed(scan);
             return;
         }
         if (ch === "\\") {
-            scan.escape = true;
+            scan.escapeMode = 1;
             return;
         }
         if (ch === "\"") {
             scan.inString = false;
-            if (scan.capturingKey) {
-                scan.capturingKey = false;
-                scan.currentKey = scan.keyBuf;
-                scan.expect = "colon";
-            } else if (scan.capturingValue) {
+            scan.escapeMode = 0;
+            if (scan.stringIsKey) {
+                scan.stringIsKey = false;
+                if (scan.capturingKey) {
+                    scan.capturingKey = false;
+                    scan.currentKey = scan.keyBuf;
+                } else {
+                    scan.currentKey = null;
+                }
+                scan.expect = "objectColon";
+                return;
+            }
+            if (scan.capturingValue) {
                 scan.capturingValue = false;
                 assignTopLevelLifecycleValue(scan);
-                scan.expect = "comma";
-                scan.currentKey = null;
-            } else if (scan.depth === 1 && scan.expect === "value") {
-                // Non-lifecycle top-level string value finished.
-                scan.expect = "comma";
-                scan.currentKey = null;
+                if (scan.malformed) return;
             }
+            afterValueClosed(scan);
             return;
         }
-        if (scan.capturingKey && scan.keyBuf.length < LIFECYCLE_FIELD_KEY_MAX_CHARS) {
-            scan.keyBuf += ch;
-        } else if (scan.capturingValue && scan.valueBuf.length < LIFECYCLE_FIELD_VALUE_MAX_CHARS) {
-            scan.valueBuf += ch;
+        // Unescaped control characters are invalid JSON.
+        if (ch.charCodeAt(0) < 0x20) {
+            markMalformed(scan);
+            return;
         }
+        appendCaptured(scan, ch);
         return;
     }
 
-    // Outside strings: ignore insignificant whitespace (newlines end records externally).
-    if (ch === " " || ch === "\t" || ch === "\r") {
-        if (scan.inPrimitive) {
-            // Whitespace ends a primitive value.
-            scan.inPrimitive = false;
-            if (scan.depth === 1) {
-                scan.expect = "comma";
-                scan.currentKey = null;
-            }
-        }
-        return;
-    }
-
+    // ── Finish primitive on whitespace / delimiter ─────────────────────────
     if (scan.inPrimitive) {
-        // Structural delimiters end the primitive; other chars continue it.
-        if (ch === "," || ch === "}" || ch === "]" || ch === "{" || ch === "[" || ch === ":") {
-            scan.inPrimitive = false;
-            if (scan.depth === 1) {
-                scan.expect = "comma";
-                scan.currentKey = null;
-            }
-            // Fall through to handle the delimiter itself.
+        if (ch === " " || ch === "\t" || ch === "\r") {
+            finishPrimitive(scan);
+            return;
+        }
+        if (ch === "," || ch === "}" || ch === "]") {
+            if (!finishPrimitive(scan)) return;
+            // Fall through to delimiter handling.
         } else {
+            feedPrimitiveChar(scan, ch);
             return;
         }
     }
+
+    // ── Insignificant whitespace outside strings/primitives ────────────────
+    if (ch === " " || ch === "\t" || ch === "\r") return;
 
     if (!scan.started) {
         if (ch === "{") {
             scan.started = true;
-            scan.depth = 1;
-            scan.expect = "key";
+            pushContainer(scan, "object");
             return;
         }
         // Non-object NDJSON noise — ignore until the next record boundary.
@@ -383,133 +678,133 @@ function feedStructuralRecordChar(scan: StructuralRecordScan, ch: string): void 
         return;
     }
 
+    // ── Structural tokens ──────────────────────────────────────────────────
     if (ch === "\"") {
-        if (scan.depth === 1 && scan.expect === "key") {
-            scan.inString = true;
-            scan.capturingKey = true;
-            scan.keyBuf = "";
-            return;
-        }
+        const d = depthOf(scan);
         if (
-            scan.depth === 1 &&
-            scan.expect === "value" &&
-            scan.currentKey !== null &&
-            LIFECYCLE_TOP_LEVEL_KEYS.has(scan.currentKey)
+            d >= 1 &&
+            scan.containers[d - 1] === "object" &&
+            (scan.expect === "objectKeyOrEnd" || scan.expect === "objectKey")
         ) {
             scan.inString = true;
-            scan.capturingValue = true;
-            scan.valueBuf = "";
+            scan.stringIsKey = true;
+            scan.escapeMode = 0;
+            if (d === 1) {
+                scan.capturingKey = true;
+                scan.keyBuf = "";
+            }
             return;
         }
-        // Nested string or non-lifecycle top-level string: track bounds only.
-        scan.inString = true;
+        if (canStartValue(scan)) {
+            scan.inString = true;
+            scan.stringIsKey = false;
+            scan.escapeMode = 0;
+            if (
+                d === 1 &&
+                scan.currentKey !== null &&
+                LIFECYCLE_TOP_LEVEL_KEYS.has(scan.currentKey)
+            ) {
+                scan.capturingValue = true;
+                scan.valueBuf = "";
+            }
+            return;
+        }
+        markMalformed(scan);
         return;
     }
 
     if (ch === ":") {
-        if (scan.depth === 1) {
-            if (scan.expect !== "colon") {
-                scan.malformed = true;
-                return;
-            }
-            scan.expect = "value";
+        if (scan.expect !== "objectColon") {
+            markMalformed(scan);
+            return;
         }
+        scan.expect = "value";
         return;
     }
 
     if (ch === "{") {
-        if (scan.depth === 1 && scan.expect !== "value" && scan.expect !== "key") {
-            // Empty-object key position allows only } or "key"; nested object only as value.
-            if (scan.expect !== "value") {
-                scan.malformed = true;
-                return;
-            }
-        }
-        if (scan.depth === 1 && scan.expect === "key") {
-            scan.malformed = true;
+        if (!canStartValue(scan)) {
+            markMalformed(scan);
             return;
         }
-        scan.depth++;
+        pushContainer(scan, "object");
         return;
     }
 
     if (ch === "[") {
-        if (scan.depth === 1 && scan.expect === "key") {
-            scan.malformed = true;
+        if (!canStartValue(scan)) {
+            markMalformed(scan);
             return;
         }
-        scan.depth++;
+        pushContainer(scan, "array");
         return;
     }
 
     if (ch === "}") {
-        if (scan.depth <= 0) {
-            scan.malformed = true;
+        // Valid only for object containers in key-or-end or comma-or-end (not after bare comma).
+        if (
+            depthOf(scan) === 0 ||
+            scan.containers[depthOf(scan) - 1] !== "object" ||
+            (scan.expect !== "objectKeyOrEnd" && scan.expect !== "commaOrEnd")
+        ) {
+            markMalformed(scan);
             return;
         }
-        scan.depth--;
-        if (scan.depth === 0) {
-            scan.finished = true;
-            return;
-        }
-        if (scan.depth === 1) {
-            // Closed a nested value at top level.
-            scan.expect = "comma";
-            scan.currentKey = null;
-        }
+        popContainer(scan, "object");
         return;
     }
 
     if (ch === "]") {
-        if (scan.depth <= 0) {
-            scan.malformed = true;
+        if (
+            depthOf(scan) === 0 ||
+            scan.containers[depthOf(scan) - 1] !== "array" ||
+            (scan.expect !== "valueOrEnd" && scan.expect !== "commaOrEnd")
+        ) {
+            markMalformed(scan);
             return;
         }
-        scan.depth--;
-        if (scan.depth === 1) {
-            scan.expect = "comma";
-            scan.currentKey = null;
-        } else if (scan.depth === 0) {
-            // Top-level arrays are not lifecycle objects.
-            scan.malformed = true;
+        popContainer(scan, "array");
+        // Top-level arrays are not lifecycle objects (started only on `{`).
+        if (depthOf(scan) === 0) {
+            markMalformed(scan);
         }
         return;
     }
 
     if (ch === ",") {
-        if (scan.depth === 1) {
-            if (scan.expect !== "comma") {
-                scan.malformed = true;
-                return;
-            }
-            scan.expect = "key";
-            scan.currentKey = null;
-        }
-        return;
-    }
-
-    // Primitive top-level/nested value (true/false/null/number): stream until delimiter.
-    if (scan.depth === 1) {
-        if (scan.expect !== "value") {
-            scan.malformed = true;
+        if (scan.expect !== "commaOrEnd") {
+            markMalformed(scan);
             return;
         }
-        scan.inPrimitive = true;
-        return;
-    }
-    if (scan.depth > 1) {
-        scan.inPrimitive = true;
+        const cur = scan.containers[depthOf(scan) - 1];
+        if (cur === "object") {
+            scan.expect = "objectKey"; // key required — trailing comma before } is invalid
+            scan.currentKey = null;
+            return;
+        }
+        if (cur === "array") {
+            scan.expect = "value"; // value required — trailing comma before ] is invalid
+            return;
+        }
+        markMalformed(scan);
         return;
     }
 
-    scan.malformed = true;
+    // Primitive value start.
+    if (canStartValue(scan) && isValueStartChar(ch)) {
+        startPrimitive(scan, ch);
+        return;
+    }
+
+    markMalformed(scan);
 }
+
 
 /**
  * Stream the complete child log for lifecycle authority only.
  * Reads fixed-size chunks and walks each NDJSON record with bounded structural
  * state (no per-record payload retention). Top-level lifecycle fields are applied
- * only after a record is structurally valid; unfinished/malformed records fail closed.
+ * only after a record is grammar-valid; unfinished/malformed records fail closed.
  */
 export function scanLifecycleEvidence(id: string): LifecycleEvidence {
     const path = logPathFor(id);
@@ -548,12 +843,19 @@ export function scanLifecycleEvidence(id: string): LifecycleEvidence {
             scan = createStructuralRecordScan();
             return;
         }
-        if (scan.malformed || scan.inString || scan.inPrimitive || scan.depth !== 0 || !scan.finished) {
+        if (
+            scan.malformed ||
+            scan.inString ||
+            scan.escapeMode !== 0 ||
+            scan.inPrimitive ||
+            scan.containers.length !== 0 ||
+            !scan.finished
+        ) {
             markUntrusted("Lifecycle scan found unfinished or malformed NDJSON record");
             scan = createStructuralRecordScan();
             return;
         }
-        // Structurally valid object: apply only top-level lifecycle ownership.
+        // Grammar-valid object: apply only top-level lifecycle ownership.
         applyLifecycleFields(
             {
                 type: scan.type,
@@ -610,8 +912,10 @@ export function scanLifecycleEvidence(id: string): LifecycleEvidence {
         closeSync(fd);
     }
 
+    // Fail closed: any unfinished/malformed record makes the stream untrusted, so
+    // terminal lifecycle evidence must not survive even if a later record looked valid.
     return {
-        sawEnd: state.sawEnd,
+        sawEnd: complete ? state.sawEnd : false,
         unmatchedToolCalls: [...openToolCalls.values()],
         complete,
         diagnostics,

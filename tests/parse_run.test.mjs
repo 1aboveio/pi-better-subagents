@@ -307,6 +307,119 @@ describe("parseRun tool execution coherence", () => {
     // @covers subagent.run-log-parser
     // @level unit
     // @fails-without-fix subagent.run-log-parser
+    it("fails closed on closed oversized records with trailing commas (invalid JSON grammar)", () => {
+        const id = `sa_parse_trail_comma_${process.pid}_${Date.now()}`;
+        mkdirSync(runDir(id), { recursive: true });
+        const fd = openSync(logPathFor(id), "w");
+        try {
+            // Closed object, but trailing comma after payload makes the record invalid JSON.
+            // Structural depth-only scanners must not treat this as agent_end evidence.
+            writeSync(fd, `{"type":"agent_end","payload":"`);
+            writeSync(fd, Buffer.alloc(LIFECYCLE_RECORD_PREFIX_BYTES + 1024, 0x78));
+            writeSync(fd, `",}\n`);
+        } finally {
+            closeSync(fd);
+        }
+
+        try {
+            const evidence = scanLifecycleEvidence(id);
+            assert.equal(evidence.complete, false);
+            assert.equal(evidence.sawEnd, false);
+            assert.deepEqual(evidence.unmatchedToolCalls, []);
+            assert.ok(evidence.diagnostics.some((d) => /malformed|unfinished|incomplete/i.test(d)));
+
+            const authoritative = parseRunForLifecycle(id);
+            assert.equal(authoritative.sawEnd, false);
+            assert.ok(authoritative.diagnostics.some((d) => /malformed|unfinished|incomplete/i.test(d)));
+        } finally {
+            rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
+
+    // @covers subagent.run-log-parser
+    // @level unit
+    // @fails-without-fix subagent.run-log-parser
+    it("fails closed on malformed tool_execution_end so it cannot balance a valid open tool", () => {
+        const id = `sa_parse_bad_tool_end_${process.pid}_${Date.now()}`;
+        mkdirSync(runDir(id), { recursive: true });
+        writeFileSync(
+            logPathFor(id),
+            [
+                JSON.stringify({
+                    type: "tool_execution_start",
+                    toolCallId: "call_bash",
+                    toolName: "bash",
+                }),
+                // Trailing comma → invalid JSON; must not close call_bash.
+                `{"type":"tool_execution_end","toolCallId":"call_bash",}`,
+                JSON.stringify({ type: "agent_end" }),
+                "",
+            ].join("\n"),
+        );
+
+        try {
+            const evidence = scanLifecycleEvidence(id);
+            assert.equal(evidence.complete, false);
+            // Malformed end must not balance the open tool, and stream is untrusted.
+            assert.deepEqual(evidence.unmatchedToolCalls, [{ id: "call_bash", toolName: "bash" }]);
+            // complete:false clears terminal authority even if a later agent_end looked present.
+            assert.equal(evidence.sawEnd, false);
+            assert.ok(evidence.diagnostics.some((d) => /malformed|unfinished|incomplete/i.test(d)));
+
+            const authoritative = parseRunForLifecycle(id);
+            assert.equal(authoritative.sawEnd, false);
+            assert.deepEqual(authoritative.unmatchedToolCalls, [
+                { id: "call_bash", toolName: "bash" },
+            ]);
+        } finally {
+            rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
+
+    // @covers subagent.run-log-parser
+    // @level unit
+    // @fails-without-fix subagent.run-log-parser
+    it("fails closed on invalid primitives, escapes, and mismatched delimiters", () => {
+        const cases = [
+            {
+                name: "invalid-primitive",
+                body: `{"type":"agent_end","ok":tru}\n`,
+            },
+            {
+                name: "invalid-escape",
+                body: `{"type":"agent_end","x":"bad\\q"}\n`,
+            },
+            {
+                name: "mismatched-delimiters",
+                body: `{"type":"agent_end","arr":[1,2}\n`,
+            },
+            {
+                name: "leading-zero-number",
+                body: `{"type":"agent_end","n":01}\n`,
+            },
+        ];
+
+        for (const c of cases) {
+            const id = `sa_parse_bad_grammar_${c.name}_${process.pid}_${Date.now()}`;
+            mkdirSync(runDir(id), { recursive: true });
+            writeFileSync(logPathFor(id), c.body);
+            try {
+                const evidence = scanLifecycleEvidence(id);
+                assert.equal(evidence.complete, false, c.name);
+                assert.equal(evidence.sawEnd, false, c.name);
+                assert.ok(
+                    evidence.diagnostics.some((d) => /malformed|unfinished|incomplete/i.test(d)),
+                    c.name,
+                );
+            } finally {
+                rmSync(runDir(id), { recursive: true, force: true });
+            }
+        }
+    });
+
+    // @covers subagent.run-log-parser
+    // @level unit
+    // @fails-without-fix subagent.run-log-parser
     it("tracks unmatched tools from large newline-free tool_execution_start records", () => {
         const id = `sa_parse_large_tool_${process.pid}_${Date.now()}`;
         writeLargeNewlineFreeRecord(id, {
