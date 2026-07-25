@@ -1,0 +1,1 @@
+fix round 1 (review of 976d245: NEEDS_CHANGES): exit evidence supersedes provisional orphaned/lost via canExitFinalize; extension-level evidence for AC1 (spawn→meta.json identity) and AC9 (fake-clock ticker lifecycle); independent probe-capability tests; rebased onto main incl. #77, conflict in subagent_result resolved (lost diagnostic folded into formatSubagentResultBody head)
