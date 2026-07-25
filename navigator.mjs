@@ -305,15 +305,34 @@ export function buildDetailLines(detail, opts = {}) {
     return lines.map((l) => truncate(l, width));
 }
 
-/** Keep selection on `id` when still present; otherwise clamp. */
+/** Keep selection on `id` when still present; otherwise clamp in place. */
 export function selectById(state, id) {
     if (id == null) {
         clampSelection(state);
         return state.selected;
     }
     const idx = (state.rows ?? []).findIndex((r) => r && r.id === id);
+    // Missing id: leave the index alone and clamp so a neighbor (or 0) is
+    // selected — never leave selected out of range after a dismiss/disappear.
     state.selected = idx >= 0 ? idx : state.selected;
     return clampSelection(state);
+}
+
+/**
+ * Replace the visible row list while keeping selection stable by run id.
+ *
+ * Status refreshes and dismissals rebuild the visible set (reorder, status
+ * text change, or a run disappearing). Selection must follow the previously
+ * selected id when it is still present; otherwise clamp safely. Returns the
+ * resulting selected index.
+ */
+export function applyNavigatorRows(state, nextRows) {
+    const prevId =
+        state && state.rows && state.rows.length > 0 && state.selected >= 0
+            ? state.rows[state.selected]?.id
+            : null;
+    state.rows = Array.isArray(nextRows) ? nextRows : [];
+    return selectById(state, prevId);
 }
 
 // ---------------------------------------------------------------------------
@@ -417,7 +436,9 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
         if (typeof deps.getRows !== "function") return;
         try {
             const next = deps.getRows();
-            if (Array.isArray(next)) state.rows = next;
+            // Keep selection by id across status refreshes / dismissals so the
+            // highlight does not jump when the visible set reorders or shrinks.
+            if (Array.isArray(next)) applyNavigatorRows(state, next);
         } catch { /* keep prior rows */ }
     }
 
