@@ -1,0 +1,1 @@
+CI fixes: live tool execute uses committed earendil package stubs + module resolver (no host pi install); sandboxed Git integration uses real sandbox-exec/bwrap when available, else Linux stub-bwrap product-builder path (honest, matches sandbox_profile patterns).
