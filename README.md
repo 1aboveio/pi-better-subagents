@@ -141,8 +141,10 @@ unref'd `bash` doesn't hold the event loop, Node drains, and the child **exits 0
 mid-turn** — no `tool_execution_end`, no `agent_end`. Historically, exit 0 was
 indistinguishable from a clean finish, so all 17 observed mid-turn exits were
 reported as ✓ completed. Finalization now requires terminal agent evidence and
-no unmatched tool starts; an incoherent exit is recorded as failed with an
-incomplete-stream diagnostic instead.
+no unmatched tool starts. Lifecycle validation classifies runs as `complete`,
+`incomplete_no_terminal_event`, `incomplete_open_tools`, `failed_exit`, or
+`killed`; incoherent exit-0 streams are recorded as failed with named lifecycle
+diagnostics on `subagent_result` and attention wording on completion callbacks.
 
 A tool allowlist alone cannot fix this. `--tools` restricts what the model may
 *call*; the package already overrode builtin `bash` at startup, so the `bash` in

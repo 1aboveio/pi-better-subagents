@@ -11,6 +11,7 @@ import { mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { processExists } from "./spawn.ts";
+import type { LifecycleClassification } from "./lifecycle.ts";
 
 /**
  * Terminal + live statuses as recorded on disk. `orphaned` is durable and
@@ -63,6 +64,8 @@ export interface RunMeta {
     exitCode?: number | null;
     /** Why an otherwise-zero exit is recorded as a non-success. */
     failureReason?: "incomplete-stream";
+    /** Named lifecycle quality from exit/stream validation. */
+    lifecycleClassification?: LifecycleClassification;
     logPath: string;
     sessionId: string;
     /** Writable dir the child is OS-sandboxed to, if any. */
