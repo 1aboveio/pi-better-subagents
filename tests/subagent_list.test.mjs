@@ -161,4 +161,31 @@ describe("subagent_list helper", () => {
             "• reviewer sa_format  [completed]  xai/grok-4.5  45s · 1.2k tok (↑400 ↓800) · $0.0034\n    hello world from prompt",
         );
     });
+
+    it("includes batch name and id for batch-launched runs only", () => {
+        const batchRun = meta("sa_batch", {
+            name: "job-1",
+            batchId: "batch_abc123",
+            batchName: "reviewers",
+            status: "running",
+            startedAt: BASE,
+        });
+        const plainRun = meta("sa_plain", {
+            name: "solo",
+            status: "running",
+            startedAt: BASE + 1,
+        });
+
+        const output = build([batchRun, plainRun], {}, {
+            usageById: () => ({ input: 0, output: 0, cacheRead: 0, costUSD: 0, total: 0 }),
+            statusOf: (m) => m.status,
+        });
+
+        assert.ok(output.includes("[batch: reviewers batch_abc123]"), output);
+        assert.equal(
+            (output.match(/\[batch:/g) ?? []).length,
+            1,
+            "only batch-launched rows should carry batch info",
+        );
+    });
 });
