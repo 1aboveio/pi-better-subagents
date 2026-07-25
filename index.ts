@@ -476,45 +476,43 @@ export default function (pi: ExtensionAPI) {
 
             const cfg = loadConfig();
             const maxConcurrent = cfg.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
-            const running = listMetas().filter((m) => ownedByThisParent(m) && effectiveStatus(m) === "running").length;
+            const countRunning = () =>
+                listMetas().filter((m) => ownedByThisParent(m) && effectiveStatus(m) === "running").length;
+            const launchAvailable = p.onCapacity === "launch-available";
 
             validateBatchPlan({ shared: p.shared, jobs: p.jobs, onCapacity: p.onCapacity, config: cfg });
-            const plan = planBatchLaunches({
-                jobs: p.jobs,
-                runningCount: running,
-                maxConcurrent,
-                onCapacity: p.onCapacity,
-            });
+
+            // reject mode: whole-batch admission only. Capacity must cover every job
+            // before anything launches. Check immediately before the launch loop so an
+            // interleaving spawn cannot create a partial batch. Once admitted, do not
+            // abandon mid-loop on capacity — that would partially launch in reject mode.
+            if (!launchAvailable) {
+                planBatchLaunches({
+                    jobs: p.jobs,
+                    runningCount: countRunning(),
+                    maxConcurrent,
+                    onCapacity: p.onCapacity,
+                });
+            }
+
             const names = assignBatchJobNames(p.jobs);
             const batchId = nextBatchId();
-
             const launched: { name: string; id: string }[] = [];
             const failed: { name: string; reason: string }[] = [];
-            for (let i = 0; i < plan.toLaunch.length; i++) {
-                const job = plan.toLaunch[i];
-                const index = p.jobs.indexOf(job);
-                const merged = mergeJobOptions(p.shared, job);
-                const name = names[index];
+            const skipped: { name: string }[] = [];
 
-                // Re-check capacity before each async launch. Between launches other
-                // subagent_spawn calls may have consumed slots; stop rather than exceed
-                // the configured cap. Already-launched runs are left running.
-                const currentRunning = listMetas().filter(
-                    (m) => ownedByThisParent(m) && effectiveStatus(m) === "running",
-                ).length;
-                if (currentRunning >= maxConcurrent) {
-                    const remaining = plan.toLaunch.slice(i).map((j) => ({
-                        name: names[p.jobs.indexOf(j)],
-                    }));
-                    if (p.onCapacity === "launch-available") {
-                        return text(formatBatchLaunchResponse({
-                            batchId, batchName: p.batchName, launched, skipped: [...plan.skipped.map((j) => ({ name: names[p.jobs.indexOf(j)] })), ...remaining], failed,
-                        }));
+            // Walk every job in order. launch-available admits one slot at a time and
+            // backfills when a job fails before a normal run is launched (no slot used).
+            for (let i = 0; i < p.jobs.length; i++) {
+                const job = p.jobs[i];
+                const name = names[i];
+                const merged = mergeJobOptions(p.shared, job);
+
+                if (launchAvailable && countRunning() >= maxConcurrent) {
+                    for (let j = i; j < p.jobs.length; j++) {
+                        skipped.push({ name: names[j] });
                     }
-                    failed.push({ name, reason: "capacity exhausted by concurrent launches before this job could start" });
-                    return text(formatBatchLaunchResponse({
-                        batchId, batchName: p.batchName, launched, skipped: plan.skipped.map((j) => ({ name: names[p.jobs.indexOf(j)] })), failed,
-                    }));
+                    break;
                 }
 
                 try {
@@ -523,18 +521,24 @@ export default function (pi: ExtensionAPI) {
                 } catch (err) {
                     const reason = err instanceof Error ? err.message : String(err);
                     failed.push({ name, reason });
-                    if (p.onCapacity !== "launch-available") {
-                        // reject mode: the whole batch was supposed to fit; fail fast
-                        // and report what launched before the failure without stopping it.
+                    if (!launchAvailable) {
+                        // reject mode: leave already-launched runs running, but every
+                        // later job must still appear in the response (not disappear).
+                        for (let j = i + 1; j < p.jobs.length; j++) {
+                            failed.push({
+                                name: names[j],
+                                reason: "not launched due to earlier job failure in reject mode",
+                            });
+                        }
                         return text(formatBatchLaunchResponse({
-                            batchId, batchName: p.batchName, launched, skipped: plan.skipped.map((j) => ({ name: names[p.jobs.indexOf(j)] })), failed,
+                            batchId, batchName: p.batchName, launched, skipped, failed,
                         }));
                     }
-                    // launch-available: continue trying the rest so we maximize useful work.
+                    // launch-available: failure did not consume a slot — continue so
+                    // later jobs can use remaining capacity (backfill).
                 }
             }
 
-            const skipped = plan.skipped.map((job) => ({ name: names[p.jobs.indexOf(job)] }));
             return text(formatBatchLaunchResponse({ batchId, batchName: p.batchName, launched, skipped, failed }));
         },
     });

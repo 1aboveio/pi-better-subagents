@@ -16,6 +16,8 @@ import {
     chmodSync,
     rmSync,
     symlinkSync,
+    lstatSync,
+    unlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -49,7 +51,29 @@ function ensureStub(name, files) {
     const linkParent = join(NODE_MODULES, dirname(name));
     mkdirSync(linkParent, { recursive: true });
     const linkPath = join(NODE_MODULES, name);
-    try { rmSync(linkPath, { recursive: true, force: true }); } catch {}
+
+    // Never recursively delete an existing checkout package path. Only unlink a
+    // symlink we previously created for this test run; otherwise leave real
+    // packages alone and fail clearly if the path is already occupied.
+    let st;
+    try {
+        st = lstatSync(linkPath);
+    } catch {
+        st = null;
+    }
+    if (st) {
+        if (st.isSymbolicLink() && CREATED_STUB_LINKS.includes(linkPath)) {
+            unlinkSync(linkPath);
+        } else if (st.isSymbolicLink()) {
+            // Pre-existing symlink from a prior interrupted run of this test — safe to replace.
+            unlinkSync(linkPath);
+        } else {
+            throw new Error(
+                `Refusing to overwrite existing package path ${linkPath}; ` +
+                    "e2e setup must never recursively delete checkout packages.",
+            );
+        }
+    }
     symlinkSync(pkgDir, linkPath, "dir");
     CREATED_STUB_LINKS.push(linkPath);
 }
@@ -151,7 +175,7 @@ function loadExtension(mod) {
     return { tools, messages };
 }
 
-async function waitForFinished(readMeta, id, { maxAttempts = 20, delayMs = 25 } = {}) {
+async function waitForFinished(readMeta, id, { maxAttempts = 80, delayMs = 25 } = {}) {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
         const meta = readMeta(id);
         if (meta && meta.status !== "running") return meta;
@@ -180,8 +204,11 @@ describe("subagent_spawn_batch end-to-end", () => {
 
     after(() => {
         process.env.PATH = origPath;
+        // Remove only the stub symlinks this test created — never a real package tree.
         for (const link of CREATED_STUB_LINKS) {
-            try { rmSync(link, { recursive: true, force: true }); } catch {}
+            try {
+                if (lstatSync(link).isSymbolicLink()) unlinkSync(link);
+            } catch {}
         }
         rmSync(RUNTIME, { recursive: true, force: true });
     });
@@ -302,6 +329,95 @@ describe("subagent_spawn_batch end-to-end", () => {
             assert.ok(launchedId);
             const meta = registry.readMeta(launchedId);
             assert.equal(meta.status, "running");
+        } finally {
+            if (origAgentDir === undefined) {
+                delete process.env.PI_CODING_AGENT_DIR;
+            } else {
+                process.env.PI_CODING_AGENT_DIR = origAgentDir;
+            }
+        }
+    });
+
+    it("reject mode accounts for later jobs when an earlier launch fails", async () => {
+        const { tools } = loadExtension(mod);
+        const ctx = makeCtx();
+
+        const fakeAgentDir = mkdtempSync(join(RUNTIME, "fake-agent-"));
+        const origAgentDir = process.env.PI_CODING_AGENT_DIR;
+        process.env.PI_CODING_AGENT_DIR = fakeAgentDir;
+        try {
+            const res = await tools.subagent_spawn_batch.execute(
+                "tc3c",
+                {
+                    shared: { model: "test/model", sandbox: false },
+                    jobs: [
+                        { prompt: "ok-job", name: "ok", tools: "read,bash" },
+                        { prompt: "bad-job", name: "bad", tools: "web_fetch" },
+                        { prompt: "later-job", name: "later", tools: "read,bash" },
+                    ],
+                },
+                null,
+                null,
+                ctx,
+            );
+
+            const text = res.content[0].text;
+            assert.match(text, /launched 1 subagent\(s\):/i);
+            assert.match(text, /• ok → sa_/);
+            assert.match(text, /Failed \(2\):/);
+            assert.match(text, /bad: .*@juicesharp\/rpiv-web-tools/);
+            assert.match(text, /later: not launched due to earlier job failure in reject mode/);
+            // The already-launched run must still be running (no auto-stop).
+            const launchedId = text.match(/• ok → (sa_[a-z0-9_]+)/)?.[1];
+            assert.ok(launchedId);
+            assert.equal(registry.readMeta(launchedId).status, "running");
+        } finally {
+            if (origAgentDir === undefined) {
+                delete process.env.PI_CODING_AGENT_DIR;
+            } else {
+                process.env.PI_CODING_AGENT_DIR = origAgentDir;
+            }
+        }
+    });
+
+    it("launch-available backfills a later job when an earlier admitted job fails before spawn", async () => {
+        const { tools } = loadExtension(mod);
+        const ctx = makeCtx();
+
+        // Leave exactly 1 free slot. If the first admitted job fails before
+        // launching a run, the second job must still get that slot.
+        for (let i = 0; i < 3; i++) {
+            writeRunningMeta(registry, `runner-${i}`);
+        }
+
+        const fakeAgentDir = mkdtempSync(join(RUNTIME, "fake-agent-"));
+        const origAgentDir = process.env.PI_CODING_AGENT_DIR;
+        process.env.PI_CODING_AGENT_DIR = fakeAgentDir;
+        try {
+            const res = await tools.subagent_spawn_batch.execute(
+                "tc3d",
+                {
+                    shared: { model: "test/model", sandbox: false },
+                    jobs: [
+                        { prompt: "bad-first", name: "bad", tools: "web_fetch" },
+                        { prompt: "good-second", name: "good", tools: "read,bash" },
+                        { prompt: "third", name: "third", tools: "read,bash" },
+                    ],
+                    onCapacity: "launch-available",
+                },
+                null,
+                null,
+                ctx,
+            );
+
+            const text = res.content[0].text;
+            assert.match(text, /launched 1 subagent\(s\):/i);
+            assert.match(text, /• good → sa_/);
+            assert.match(text, /Failed \(1\): bad: .*@juicesharp\/rpiv-web-tools/);
+            assert.match(text, /Skipped \(capacity\): third/);
+            const launchedId = text.match(/• good → (sa_[a-z0-9_]+)/)?.[1];
+            assert.ok(launchedId);
+            assert.equal(registry.readMeta(launchedId).status, "running");
         } finally {
             if (origAgentDir === undefined) {
                 delete process.env.PI_CODING_AGENT_DIR;

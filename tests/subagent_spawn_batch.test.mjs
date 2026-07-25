@@ -190,15 +190,14 @@ describe("validateBatchPlan", () => {
         );
     });
 
-    it("rejects clean:true with allow_nested:true", () => {
-        assert.throws(
-            () =>
-                validateBatchPlan({
-                    shared: {},
-                    jobs: [{ prompt: "x", clean: true, allow_nested: true }],
-                    config: CFG,
-                }),
-            /clean:true with allow_nested:true/,
+    it("accepts clean:true with allow_nested:true to match single-spawn parity", () => {
+        // Single-spawn does not reject this combination; batch must match.
+        assert.doesNotThrow(() =>
+            validateBatchPlan({
+                shared: {},
+                jobs: [{ prompt: "x", clean: true, allow_nested: true, tools: "read,bash" }],
+                config: CFG,
+            }),
         );
     });
 
@@ -437,9 +436,48 @@ describe("index.ts batch wiring", () => {
     // @covers subagent-spawn-batch.nesting-control
     // @level unit
     it("includes subagent_spawn_batch in the child nesting denylist", () => {
+        // Parse the SUBAGENT_TOOLS array specifically so removing the batch tool
+        // from that set fails even if the tool name still appears elsewhere.
+        const match = indexSource.match(/const SUBAGENT_TOOLS\s*=\s*\[([\s\S]*?)\];/);
+        assert.ok(match, "index.ts must declare SUBAGENT_TOOLS");
+        const members = [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
         assert.ok(
-            indexSource.includes('"subagent_spawn_batch"'),
+            members.includes("subagent_spawn_batch"),
             "SUBAGENT_TOOLS must include the batch tool so child recursion boundaries stay coherent",
+        );
+        assert.ok(
+            members.includes("subagent_spawn"),
+            "SUBAGENT_TOOLS must still include subagent_spawn",
+        );
+    });
+
+    // @covers subagent-spawn-batch.capacity-admission
+    // @level unit
+    it("reject mode does not re-check capacity mid-loop after admission", () => {
+        // Once reject-mode admits the batch, a mid-loop capacity branch would
+        // partially launch — the execute body must not abandon remaining jobs
+        // for capacity after the pre-loop whole-batch check.
+        const executeMatch = indexSource.match(
+            /name:\s*"subagent_spawn_batch"[\s\S]*?async execute[\s\S]*?(?=\/\/ ---- subagent_list)/,
+        );
+        assert.ok(executeMatch, "must locate subagent_spawn_batch.execute");
+        const body = executeMatch[0];
+        assert.ok(
+            body.includes('p.onCapacity === "launch-available"') ||
+                body.includes("launchAvailable"),
+            "capacity mid-loop skip must be gated on launch-available",
+        );
+        // The only capacity-exhaustion skip of remaining jobs must be under
+        // launch-available; reject mode accounts for later jobs as failed, not skipped.
+        assert.match(
+            body,
+            /if\s*\(\s*launchAvailable\s*&&\s*countRunning\(\)\s*>=\s*maxConcurrent\s*\)/,
+            "mid-loop capacity skip must require launchAvailable",
+        );
+        assert.match(
+            body,
+            /not launched due to earlier job failure in reject mode/,
+            "reject-mode launch failure must account for later jobs explicitly",
         );
     });
 });

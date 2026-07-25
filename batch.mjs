@@ -72,14 +72,10 @@ export function validateBatchPlan({ shared, jobs, onCapacity, config }) {
 
         const merged = mergeJobOptions(shared, job);
         if (merged.clean === true) {
-            if (merged.allow_nested === true) {
-                throw new Error(
-                    `job ${i + 1} (${merged.name ?? i + 1}): clean:true with allow_nested:true ` +
-                        "is invalid — clean children load no extensions, so nested subagent tools cannot exist.",
-                );
-            }
             // Validate the effective tool allowlist, which resolves in this order:
             // per-job tools → shared tools → config.defaultTools → clean-safe built-ins.
+            // Note: we intentionally do NOT reject clean:true + allow_nested:true here;
+            // single-spawn accepts that combination, so batch validation must match it exactly.
             const rawTools = merged.tools ?? config?.defaultTools ?? SAFE_CLEAN_TOOLS;
             const toolList = rawTools
                 .split(",")
