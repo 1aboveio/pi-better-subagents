@@ -34,3 +34,22 @@ jobs:
 
       - name: Unit tests
         run: node --test tests/*.test.mjs
+
+  macos-sandbox:
+    name: macos-sandbox
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Preserve the existing deterministic sandbox-exec assertions in the
+      # per-PR gate while the real-child queue lane runs on Ubuntu.
+      - name: Run macOS sandbox-exec confinement checks
+        run: |
+          set -euo pipefail
+          bash tests/test_sandbox_applied.sh
+          bash tests/test_sandbox_deny_outside.sh
+          node --test tests/sandbox_profile.test.mjs
