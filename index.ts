@@ -789,8 +789,14 @@ export default function (pi: ExtensionAPI) {
         stopTicker();
         stopHealthTicker();
         spendCache.clear();
+        // Widget clear is intentional in every mode that exposes ui (incl. RPC
+        // — pi docs: setWidget works in both TUI and RPC). Navigator cleanup
+        // is TUI-only: the footer hint is never published outside TUI, so
+        // clearing it in RPC would be a pure UI leak (setStatus subagents-nav).
         try { ctx.ui.setWidget("subagents", WIDGET_CLEAR); } catch { /* ignore */ }
-        try { ctx.ui.setStatus(NAVIGATOR_STATUS_KEY, undefined); } catch { /* ignore */ }
+        if (isNavigatorUiAvailable(ctx)) {
+            try { ctx.ui.setStatus(NAVIGATOR_STATUS_KEY, undefined); } catch { /* ignore */ }
+        }
         lastNavigatorHint = undefined;
         lastWidgetLines = undefined;
     });

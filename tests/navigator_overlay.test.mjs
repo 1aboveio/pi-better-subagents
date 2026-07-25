@@ -27,8 +27,11 @@
  */
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import {
     writeMeta,
     readMeta,
@@ -212,12 +215,88 @@ describe("non-TUI guard", () => {
     it("every navigator entry point in index.ts is behind the TUI-mode guard", () => {
         const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
         // The guard seam is the single gate used by footer install/update, the
-        // editor install, and overlay open — print/RPC contexts fail it.
+        // editor install, overlay open, AND session_shutdown status cleanup —
+        // print/RPC contexts fail it.
         assert.ok(src.includes("isNavigatorUiAvailable"), "index.ts must gate navigator wiring on isNavigatorUiAvailable");
         const navSrc = readFileSync(new URL("../navigator.mjs", import.meta.url), "utf8");
         assert.ok(
             navSrc.includes('ctx.mode === "tui"'),
             "isNavigatorUiAvailable must require explicit TUI mode (pi docs: hasUI is true in TUI AND RPC)",
+        );
+        // Shutdown cleanup is part of the same invariant class: a bare
+        // ctx.ui.setStatus(NAVIGATOR_STATUS_KEY, ...) in session_shutdown would
+        // leak into RPC even when every other entry point is guarded.
+        const shutdownIdx = src.indexOf('pi.on("session_shutdown"');
+        assert.ok(shutdownIdx >= 0, "session_shutdown handler must exist");
+        const shutdownBody = src.slice(shutdownIdx, src.indexOf("});", shutdownIdx) + 3);
+        assert.ok(
+            shutdownBody.includes("isNavigatorUiAvailable"),
+            "session_shutdown must guard navigator setStatus cleanup with isNavigatorUiAvailable",
+        );
+        assert.ok(
+            /isNavigatorUiAvailable\s*\(\s*ctx\s*\)[\s\S]*setStatus\s*\(\s*NAVIGATOR_STATUS_KEY/.test(shutdownBody),
+            "navigator setStatus cleanup must sit behind isNavigatorUiAvailable(ctx)",
+        );
+    });
+
+    // @covers navigator.footer-hint
+    // @level unit
+    it("real pi RPC startup-through-shutdown emits no navigator setStatus", async () => {
+        // Live regression for the invariant class closed by Fix Round 2: at
+        // HEAD bc0d0f the session_shutdown handler called
+        // ctx.ui.setStatus('subagents-nav', undefined) unconditionally, so a
+        // real `pi --mode rpc` probe emitted extension_ui_request setStatus
+        // even though every other navigator entry point was TUI-guarded.
+        // Widget setWidget remains legitimate in RPC (pi docs) and is not
+        // asserted away here.
+        const repoRoot = path.dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
+        const events = await new Promise((resolve, reject) => {
+            const child = spawn(
+                "pi",
+                ["--mode", "rpc", "--no-session", "--no-extensions", "-e", "./index.ts"],
+                { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] },
+            );
+            let out = "";
+            let err = "";
+            child.stdout.on("data", (d) => { out += d; });
+            child.stderr.on("data", (d) => { err += d; });
+            const failTimer = setTimeout(() => {
+                try { child.kill("SIGTERM"); } catch { /* ignore */ }
+                reject(new Error(`pi RPC probe timed out; stderr=${err.slice(0, 400)} stdout=${out.slice(0, 400)}`));
+            }, 8000);
+            // Give the extension a beat to register, then ask for state and
+            // close stdin so session_shutdown runs.
+            setTimeout(() => {
+                try {
+                    child.stdin.write(JSON.stringify({ type: "get_state" }) + "\n");
+                    child.stdin.end();
+                } catch { /* ignore broken pipe on early exit */ }
+            }, 150);
+            child.on("error", (e) => {
+                clearTimeout(failTimer);
+                reject(e);
+            });
+            child.on("close", () => {
+                clearTimeout(failTimer);
+                const lines = out
+                    .split(/\n+/)
+                    .map((l) => l.trim())
+                    .filter(Boolean)
+                    .map((l) => {
+                        try { return JSON.parse(l); } catch { return { raw: l }; }
+                    });
+                resolve(lines);
+            });
+        });
+        const navStatus = events.filter(
+            (e) => e && e.type === "extension_ui_request"
+                && e.method === "setStatus"
+                && e.statusKey === NAVIGATOR_STATUS_KEY,
+        );
+        assert.deepEqual(
+            navStatus,
+            [],
+            `RPC startup-through-shutdown must not emit navigator setStatus; got ${JSON.stringify(navStatus)}`,
         );
     });
 });
