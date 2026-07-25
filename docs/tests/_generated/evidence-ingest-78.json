@@ -1,0 +1,28 @@
+{
+  "entries": [
+    {
+      "name": "unit + integration tests",
+      "command": "node --test tests/*.test.mjs",
+      "result": "135 tests pass / 0 fail / 0 skipped",
+      "status": "Pass"
+    },
+    {
+      "name": "lint-tests gates",
+      "command": "lint-tests.mjs --rules no-skip,no-fixed-timeout,no-empty-test,mock-internal-seam --diff <base>",
+      "result": "0 findings in diff; 0 findings whole-tree mock-internal-seam",
+      "status": "Pass"
+    },
+    {
+      "name": "coverage-ledger (warn-only: pre-existing Unverified)",
+      "command": "coverage-ledger.mjs validate --warn-only",
+      "result": "8 pre-existing Unverified surfaces (widget.*, sandbox.*) outside #78; exit 0",
+      "status": "Pass"
+    },
+    {
+      "name": "scan-diff findings channel",
+      "command": "git diff <base>...HEAD | scan-diff.mjs",
+      "result": "findings []",
+      "status": "Pass"
+    }
+  ]
+}

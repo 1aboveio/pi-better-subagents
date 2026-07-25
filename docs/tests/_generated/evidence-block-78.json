@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "headSha": "695d29013b16d7db9b75320cdb498d9f9c178cb2",
+  "baseSha": "4dee1696f27a623780572b0e7de25ccc496e705b",
+  "collectedAt": "2026-07-25T15:21:24.330Z",
+  "scan": {
+    "findingCounts": {},
+    "findings": [],
+    "leadCounts": {
+      "unanchored-pattern": 60,
+      "new-branch": 31,
+      "modifies-existing-behavior": 1
+    },
+    "leadCount": 92
+  },
+  "ci": {
+    "status": "unavailable",
+    "reason": "no workflow run found for 695d29013b16d7db9b75320cdb498d9f9c178cb2"
+  },
+  "ingested": [
+    {
+      "name": "unit + integration tests",
+      "command": "node --test tests/*.test.mjs",
+      "result": "135 tests pass / 0 fail / 0 skipped",
+      "status": "Pass"
+    },
+    {
+      "name": "lint-tests gates",
+      "command": "lint-tests.mjs --rules no-skip,no-fixed-timeout,no-empty-test,mock-internal-seam --diff <base>",
+      "result": "0 findings in diff; 0 findings whole-tree mock-internal-seam",
+      "status": "Pass"
+    },
+    {
+      "name": "coverage-ledger (warn-only: pre-existing Unverified)",
+      "command": "coverage-ledger.mjs validate --warn-only",
+      "result": "8 pre-existing Unverified surfaces (widget.*, sandbox.*) outside #78; exit 0",
+      "status": "Pass"
+    },
+    {
+      "name": "scan-diff findings channel",
+      "command": "git diff <base>...HEAD | scan-diff.mjs",
+      "result": "findings []",
+      "status": "Pass"
+    }
+  ]
+}

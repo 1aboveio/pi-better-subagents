@@ -1,0 +1,16 @@
+[
+  {
+    "surface": "subagent_spawn (git_clone_workspace path)",
+    "kind": "tool",
+    "status": "pass",
+    "command": "node --test tests/git_clone_workspace_wiring.test.mjs tests/git_workspace.test.mjs",
+    "observed": "subagent_spawn git_clone_workspace parameter wired to resolveSubagentWorkspace; clone prepared and real git operations succeed"
+  },
+  {
+    "surface": "git-workspace.ts",
+    "kind": "library",
+    "status": "pass",
+    "command": "node --test tests/git_workspace.test.mjs",
+    "observed": "inspectGitWorkspace, prepareGitCloneWorkspace, resolveSubagentWorkspace happy paths exercised with real git subprocesses"
+  }
+]
