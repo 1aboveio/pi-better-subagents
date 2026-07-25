@@ -72,13 +72,16 @@ it does not depend on any other extension being installed.
   becomes the child's cwd). The profile also permits writes to pi's own state
   (`~/.pi`), system temp, and `/dev` so pi can function; everything else (your
   home, the repo, `/etc`, …) is read-only to the subagent.
-- **Tool allowlist.** The child is scoped to an explicit set of tools (see below).
+- **Tool allowlist.** The child is scoped to an explicit set of tools, which also
+  decides what extension code loads (see below).
 - **No runaway recursion.** A subagent cannot spawn its own subagents unless
-  `allow_nested:true`.
-- **Guardrails compose (bonus).** Because extensions load in the child by default,
-  any guardrails extension you run (e.g. `@aliou/pi-guardrails`) also applies
-  inside subagents and **fails safe** headlessly — but the sandbox above means you
-  don't depend on it for confinement.
+  `allow_nested:true` — and not by denying the tools after the fact: without that
+  flag this package isn't loaded in the child, so the tools don't exist.
+
+Note that because children load only the extensions backing their tools, a
+guardrails extension (e.g. `@aliou/pi-guardrails`) does **not** apply inside a
+subagent unless you map a tool to it. The OS write sandbox above is what confines
+the child, and it doesn't depend on any extension.
 
 ## Tool scoping (allowlist)
 
@@ -94,9 +97,77 @@ top.
 - `maxConcurrent` — how many subagents may run at once (**default 4**). A spawn
   past the cap is rejected until a running one finishes.
 
-Extensions load in the child by default, so extension-provided tools
-(`web_fetch`, MCP, extension-provided model auth like xai) work out of the box.
-Pass `clean:true` for a hermetic, built-ins-only child.
+## The allowlist also decides what LOADS
+
+The `tools` allowlist does double duty: it is both what the child may call **and**
+which extension *code* is loaded into it. A child launches as
+
+```
+pi -p --mode json --no-extensions -e <package backing a requested tool> ...
+```
+
+so a package that backs no requested tool never loads. With the default
+allowlist (`read, bash, edit, write, web_search, web_fetch`) exactly one package
+loads — the web-tools one — and `web_fetch` works normally.
+
+Two maps in `config.json` drive it:
+
+- `toolExtensions` — tool name → package(s) providing it. Built-ins (`read`,
+  `bash`, `edit`, `write`) need no entry.
+- `providerExtensions` — provider → auth package. Model auth is not tool-shaped:
+  `xai/grok-4.5` needs `pi-xai-oauth` loaded whatever tools it was granted.
+
+Ask for a tool with no mapping and the spawn still succeeds, but says so at
+launch — the tool simply will not exist in the child.
+
+`clean:true` is the narrowest case of the same mechanism: no extensions at all.
+`allow_nested:true` is the one thing that loads *this* package into the child;
+without it, nested spawning is impossible because the code isn't there.
+
+`inheritExtensions: true` in `config.json` restores the old load-everything
+behavior. It is **operator-only** — no spawn parameter can reach it, so the child
+model cannot widen its own runtime. It also re-exposes the failure below.
+
+### Why: a subagent that loads everything can die mid-turn reporting success
+
+Loading every installed package means inheriting their startup side effects. A
+package that replaces builtin `bash` with a `detached` + `unref()` spawn breaks
+`pi -p`: on a parallel `bash` + `read` batch the in-process `read` finishes, the
+unref'd `bash` doesn't hold the event loop, Node drains, and the child **exits 0
+mid-turn** — no `tool_execution_end`, no `agent_end`. Exit 0 is indistinguishable
+from a clean finish, so it is reported as completed. Across 30 recorded runs, 17
+died this way and every one was reported as ✓ completed.
+
+A tool allowlist alone cannot fix this. `--tools` restricts what the model may
+*call*; the package already overrode builtin `bash` at startup, so the `bash` in
+your allowlist **is** the broken one. Measured with the default 6 tools:
+
+| runtime | tool starts / ends | terminal event |
+|---|---|---|
+| all extensions loaded | 2 / 1 | none — exits 0 mid-turn |
+| `--no-extensions -e <web-tools>` | 3 / 3 | `agent_settled`, `web_fetch` OK |
+
+A package *denylist* isn't expressible either: pi has only `-e <path>` (add one)
+and `--no-extensions` (all off) — there is no "load all except X" flag. Naming
+what you want is the only mechanism that excludes anything, and it excludes
+future offenders too, with no name to keep updated.
+
+### Known incompatibility: `pi-patty-bg-tasks`
+
+**`pi-patty-bg-tasks` (tested at 1.1.6) is incompatible with subagents and must
+not be loaded into a child.** It is the package that produced the failure above:
+it replaces builtin `bash` and spawns `detached` + `proc.unref()`
+(`src/spawn.ts`), which in print mode drains the event loop mid-turn. Bisected
+against all 18 installed packages — alone it reproduces; every other package
+alone is fine.
+
+The default configuration already excludes it, structurally, because it backs no
+requested tool. You only re-expose it by setting `inheritExtensions: true`, or by
+mapping a tool to it in `toolExtensions`. Don't.
+
+A proper fix belongs upstream — preserve builtin `bash` semantics when overriding
+it, keep foreground subprocesses referenced until the tool promise settles, and
+put genuinely detached work behind a separate background-task tool.
 
 ## Status & cost tracking
 
@@ -150,8 +221,12 @@ Then `/reload` (or restart pi). It appears as `pi-better-subagents`.
 
 ## Tests
 
+Unit tests (`node --test tests/*.test.mjs`) cover the pure logic — widget
+rendering, completion delivery, and extension resolution.
+
 Real integration smoke tests live in [`tests/`](tests/) — a subagent using
-`web_fetch`, one driving `gh`, and env inheritance through the sandbox. See
+`web_fetch`, one driving `gh`, env inheritance through the sandbox, and headless
+isolation surviving a parallel `bash` + `read` batch. See
 [`tests/README.md`](tests/README.md).
 
 ## Roadmap
