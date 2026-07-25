@@ -85,8 +85,10 @@ import {
     applyNavigatorFooter,
     isNavigatorUiAvailable,
     buildNavigatorRows,
+    buildNavigatorDetail,
     installNavigatorEditor,
-    showNavigator,
+    openTrackedNavigator,
+    disposeTrackedNavigator,
 } from "./navigator.ts";
 
 /** The tools this extension registers — excluded from children by default so a
@@ -280,21 +282,26 @@ export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void 
 }
 
 // ---- minimal subagent navigator (empty-editor ←, #45) --------------------
+// ---- subagent navigator (empty-editor ← list #45, live detail #46) --------
 //
 // Human-facing TUI surface, kept separate from the passive live widget (which
-// is untouched). Three glue points, all gated on isNavigatorUiAvailable so
-// print/RPC sessions never see any of it:
+// is untouched). Glue points, all gated on isNavigatorUiAvailable so print/RPC
+// sessions never see any of it:
 //   1. footer hint `← subagents · N` via the DEFAULT footer status mechanism
 //      (setStatus — the full footer is never replaced);
 //   2. an editor wrapper that intercepts bare ← only when the editor is empty
 //      and visible runs exist, delegating everything else to the wrapped
 //      editor (composition via navigator.mjs, tested with fakes);
 //   3. a focused overlay (ctx.ui.custom(..., { overlay: true })) listing the
-//      #44 navigatorVisibleRuns newest first. List view has no timers — the
-//      refreshing detail view is #46.
+//      #44 navigatorVisibleRuns newest first, with Enter → live detail view
+//      that refreshes once per second (#46). Detail timers dispose on back,
+//      Escape, overlay close, and session_shutdown.
 
 /** Last footer hint published (undefined ⇒ never set); dirty-check guard. */
 let lastNavigatorHint: string | null | undefined;
+
+/** Active navigator overlay dispose hook (clears detail timers on teardown). */
+let activeNavigatorDispose: (() => void) | undefined;
 
 /** Rows for the overlay: visible current-parent runs, newest first (#44 seam). */
 function navigatorRows() {
@@ -306,13 +313,39 @@ function navigatorRows() {
     });
 }
 
+/** Live detail snapshot for one run (registry + log parse). */
+function navigatorDetail(id: string) {
+    return buildNavigatorDetail(id, {
+        readMeta,
+        effectiveStatus,
+        parseRun,
+        shortModel,
+        fmtElapsed,
+        fmtSpend,
+    });
+}
+
+/** Mutable slot holding the active overlay's dispose hook. */
+const navigatorDisposeSlot = {
+    get: () => activeNavigatorDispose,
+    set: (fn: (() => void) | undefined) => { activeNavigatorDispose = fn; },
+};
+
 /** Open the focused navigator overlay. No-op without a UI or visible runs. */
 function openNavigator(ctx: ExtensionContext): void {
     if (!isNavigatorUiAvailable(ctx)) return;
     const rows = navigatorRows();
     if (rows.length === 0) return;
     try {
-        void showNavigator(ctx.ui, rows, { matchKey: matchesKey, truncate: truncateToWidth });
+        // Pi's ui.custom() resolves with done()'s value (null), NOT the component.
+        // openTrackedNavigator captures dispose synchronously via onComponent
+        // and clears the slot when the overlay promise settles.
+        openTrackedNavigator(ctx.ui, rows, {
+            matchKey: matchesKey,
+            truncate: truncateToWidth,
+            getDetail: (id: string) => navigatorDetail(id),
+            getRows: () => navigatorRows(),
+        }, navigatorDisposeSlot);
     } catch { /* never let UI glue break the session */ }
 }
 
@@ -791,6 +824,9 @@ export default function (pi: ExtensionAPI) {
         stopTicker();
         stopHealthTicker();
         spendCache.clear();
+        // Always dispose navigator detail timers (no UI call — just clearInterval).
+        // Safe in every mode; the dispose hook is only set when a TUI overlay opened.
+        disposeTrackedNavigator(navigatorDisposeSlot);
         // Widget clear is intentional in every mode that exposes ui (incl. RPC
         // — pi docs: setWidget works in both TUI and RPC). Navigator cleanup
         // is TUI-only: the footer hint is never published outside TUI, so

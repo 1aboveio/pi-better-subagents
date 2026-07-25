@@ -1,14 +1,21 @@
 /**
- * Pure seams for the minimal TUI subagent navigator (issue #45).
+ * Pure seams for the TUI subagent navigator (issues #45 list, #46 detail).
  *
  * Kept free of pi / pi-tui imports (mirrors widget.mjs) so unit tests pin the
  * behavior contracts without a live TUI. index.ts injects the pi-specific
- * pieces (matchesKey, truncateToWidth, CustomEditor, ctx) at the boundary.
+ * pieces (matchesKey, truncateToWidth, CustomEditor, ctx, getDetail) at the
+ * boundary.
  *
  * The navigator is a HUMAN organization surface: it reads the #44 registry
  * visibility seams (`navigatorVisibleRuns` / `navigatorVisibleCount`) and never
  * mutates run state. The passive live widget is untouched by this module.
+ *
+ * Detail view (#46) refreshes via an injected interval (default 1s) and must
+ * dispose that timer on every exit path (back, Escape, overlay close, teardown).
  */
+
+/** Detail-view refresh cadence (ms). Mirrors the live widget tick. */
+export const DETAIL_TICK_MS = 1000;
 
 /** Footer status key for the `← subagents · N` hint (default footer mechanism). */
 export const NAVIGATOR_STATUS_KEY = "subagents-nav";
@@ -131,8 +138,93 @@ export function buildNavigatorLines(state, opts = {}) {
         if (r.spend) parts.push(r.spend);
         lines.push(prefix + parts.join(" · "));
     }
-    lines.push("↑↓ select · esc close");
+    lines.push("↑↓ select · enter open · esc close");
     return lines.map((l) => truncate(l, width));
+}
+
+// ---------------------------------------------------------------------------
+// Detail view (issue #46)
+// ---------------------------------------------------------------------------
+
+/**
+ * Assemble a detail snapshot for one run. All I/O lives behind deps so the
+ * seam stays unit-testable; index.ts wires readMeta/parseRun/fmt*.
+ *
+ * @param {string} id
+ * @param {object} deps
+ * @param {(id: string) => object|undefined} deps.readMeta
+ * @param {(m: object) => string} deps.effectiveStatus
+ * @param {(id: string) => { finalText: string, lastActivity: string, toolCalls: string[], usage: object }} deps.parseRun
+ * @param {(model?: string) => string} deps.shortModel
+ * @param {(ms: number) => string} deps.fmtElapsed
+ * @param {(u: object) => string} deps.fmtSpend
+ * @param {number} [deps.now]
+ * @returns {object|null} detail fields, or null when the run is unknown
+ */
+export function buildNavigatorDetail(id, deps) {
+    const meta = deps.readMeta(id);
+    if (!meta) return null;
+    const now = deps.now ?? Date.now();
+    const parsed = deps.parseRun(id);
+    const toolCalls = parsed.toolCalls ?? [];
+    const status = deps.effectiveStatus(meta);
+    const running = status === "running";
+    return {
+        id: meta.id,
+        name: meta.name,
+        status,
+        model: deps.shortModel(meta.model),
+        elapsed: deps.fmtElapsed((meta.endedAt ?? now) - meta.startedAt),
+        tools: toolCalls.length ? toolCalls.join(", ") : "",
+        // Only a live run has a "current" tool (the latest invocation).
+        currentTool: running && toolCalls.length ? toolCalls[toolCalls.length - 1] : undefined,
+        spend: deps.fmtSpend(parsed.usage) || "",
+        // Terminal prefers the final answer; running shows the live activity.
+        output: (running ? (parsed.lastActivity || parsed.finalText) : (parsed.finalText || parsed.lastActivity)) || "",
+    };
+}
+
+/**
+ * Plain-text detail lines. Truncated BEFORE any theme styling (callers style
+ * after), so visible width never exceeds `width`.
+ */
+export function buildDetailLines(detail, opts = {}) {
+    const width = opts.width ?? 80;
+    const truncate = opts.truncate ?? ((s) => s);
+    if (!detail) {
+        return ["(run unavailable)", "← back · esc close"].map((l) => truncate(l, width));
+    }
+    const title = detail.name || detail.id || "?";
+    const lines = [];
+    lines.push(title);
+    lines.push(`status  ${detail.status ?? "?"}`);
+    lines.push(`model   ${detail.model ?? "?"}`);
+    lines.push(`elapsed ${detail.elapsed ?? "?"}`);
+    // Prefer "current" while running; fall back to the full used-tools list.
+    const toolsLabel = detail.currentTool
+        ? `current ${detail.currentTool}`
+        : (detail.tools ? `tools   ${detail.tools}` : "tools   (none)");
+    lines.push(toolsLabel);
+    lines.push(detail.spend ? `spend   ${detail.spend}` : "spend   (none)");
+    lines.push("output");
+    const body = detail.output && String(detail.output).trim() ? String(detail.output) : "(no output yet)";
+    // Split multi-line output; each physical line is truncated independently.
+    for (const raw of body.split(/\r?\n/)) {
+        lines.push(raw.length ? raw : " ");
+    }
+    lines.push("← back · esc close");
+    return lines.map((l) => truncate(l, width));
+}
+
+/** Keep selection on `id` when still present; otherwise clamp. */
+export function selectById(state, id) {
+    if (id == null) {
+        clampSelection(state);
+        return state.selected;
+    }
+    const idx = (state.rows ?? []).findIndex((r) => r && r.id === id);
+    state.selected = idx >= 0 ? idx : state.selected;
+    return clampSelection(state);
 }
 
 // ---------------------------------------------------------------------------
@@ -152,31 +244,146 @@ export function buildNavigatorLines(state, opts = {}) {
  */
 export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
     const state = createNavigatorState(rows);
+    /** @type {'list' | 'detail'} */
+    let mode = "list";
+    /** @type {object|null} */
+    let detail = null;
+    /** @type {string|null} id of the run currently shown in detail */
+    let detailId = null;
+    /** @type {ReturnType<typeof setInterval>|null} */
+    let detailTimer = null;
+    let closed = false;
+
+    const setIntervalFn = deps.setInterval ?? globalThis.setInterval.bind(globalThis);
+    const clearIntervalFn = deps.clearInterval ?? globalThis.clearInterval.bind(globalThis);
+    const tickMs = deps.tickMs ?? DETAIL_TICK_MS;
+
     const fg = (color, s) =>
         theme && typeof theme.fg === "function" ? theme.fg(color, s) : s;
+
+    function stopDetailTimer() {
+        if (detailTimer != null) {
+            try { clearIntervalFn(detailTimer); } catch { /* ignore */ }
+            detailTimer = null;
+        }
+    }
+
+    function loadDetail(id) {
+        if (typeof deps.getDetail !== "function") return null;
+        try {
+            return deps.getDetail(id) ?? null;
+        } catch {
+            return null;
+        }
+    }
+
+    function enterDetail() {
+        if (state.rows.length === 0) return;
+        const row = state.rows[state.selected];
+        if (!row) return;
+        detailId = row.id;
+        detail = loadDetail(detailId) ?? {
+            id: detailId,
+            name: row.name,
+            status: row.status,
+            model: row.model,
+            elapsed: row.elapsed,
+            spend: row.spend,
+            tools: "",
+            output: "",
+        };
+        mode = "detail";
+        stopDetailTimer();
+        // Refresh once per second while the detail view is open.
+        detailTimer = setIntervalFn(() => {
+            if (mode !== "detail" || detailId == null) return;
+            detail = loadDetail(detailId) ?? detail;
+            try { tui.requestRender(); } catch { /* ignore */ }
+        }, tickMs);
+        try { tui.requestRender(); } catch { /* ignore */ }
+    }
+
+    function leaveDetail() {
+        if (mode !== "detail") return;
+        const viewedId = detailId;
+        stopDetailTimer();
+        mode = "list";
+        detail = null;
+        detailId = null;
+        // Optional live list refresh so a disappeared run can clamp cleanly.
+        if (typeof deps.getRows === "function") {
+            try {
+                const next = deps.getRows();
+                if (Array.isArray(next)) state.rows = next;
+            } catch { /* keep prior rows */ }
+        }
+        selectById(state, viewedId);
+        try { tui.requestRender(); } catch { /* ignore */ }
+    }
+
+    function close() {
+        if (closed) return;
+        closed = true;
+        stopDetailTimer();
+        mode = "list";
+        detail = null;
+        detailId = null;
+        try { done(null); } catch { /* ignore */ }
+    }
+
+    function dispose() {
+        // Session teardown / host overlay dismiss — always safe, idempotent.
+        stopDetailTimer();
+        mode = "list";
+        detail = null;
+        detailId = null;
+    }
+
     return {
         render(width) {
+            if (mode === "detail") {
+                const lines = buildDetailLines(detail, { width, truncate: deps.truncate });
+                return lines.map((line, i) => {
+                    if (i === 0) return fg("accent", line);
+                    if (i === lines.length - 1) return fg("dim", line);
+                    return line;
+                });
+            }
             const lines = buildNavigatorLines(state, { width, truncate: deps.truncate });
             return lines.map((line, i) => {
                 if (i === 0) return fg("accent", line);
                 if (i === lines.length - 1) return fg("dim", line);
-                if (rows.length > 0 && i === 1 + state.selected) return fg("accent", line);
+                if (state.rows.length > 0 && i === 1 + state.selected) return fg("accent", line);
                 return line;
             });
         },
         handleInput(data) {
+            if (closed) return;
+            if (mode === "detail") {
+                if (deps.matchKey(data, "left")) {
+                    leaveDetail();
+                } else if (deps.matchKey(data, "escape")) {
+                    close();
+                }
+                // Detail owns no other keys in #46 (close/dismiss is #47).
+                return;
+            }
             if (deps.matchKey(data, "up")) {
                 if (moveSelection(state, -1)) tui.requestRender();
             } else if (deps.matchKey(data, "down")) {
                 if (moveSelection(state, 1)) tui.requestRender();
+            } else if (deps.matchKey(data, "enter")) {
+                enterDetail();
             } else if (deps.matchKey(data, "escape")) {
-                done(null);
+                close();
             }
-            // Anything else is ignored: the list view owns no other keys in #45.
+            // Anything else is ignored in list view (#47 owns `x`).
         },
         invalidate() {
             // Stateless render — nothing cached to clear on theme changes.
         },
+        /** Clear detail timers. Safe to call multiple times / after close. */
+        dispose,
     };
 }
 
@@ -189,9 +396,87 @@ export function createNavigatorOverlayFactory(rows, deps) {
 /**
  * Open the navigator as a focused overlay. `ui.custom(factory, { overlay: true })`
  * makes pi render it on top of existing content and focus it on show.
+ *
+ * Pi's `custom()` resolves with the value passed to `done()` (typically `null`),
+ * NOT the component instance. Callers that need the component (e.g. to capture
+ * `dispose` for session_shutdown) must use `deps.onComponent`, which is invoked
+ * synchronously inside the factory when pi constructs the overlay.
+ *
+ * @param {object} ui
+ * @param {Array<object>} rows
+ * @param {object} [deps]
+ * @param {(component: object) => void} [deps.onComponent] - sync capture seam
  */
-export function showNavigator(ui, rows, deps) {
-    return ui.custom(createNavigatorOverlayFactory(rows, deps), { overlay: true });
+export function showNavigator(ui, rows, deps = {}) {
+    const baseFactory = createNavigatorOverlayFactory(rows, deps);
+    return ui.custom((tui, theme, keybindings, done) => {
+        const component = baseFactory(tui, theme, keybindings, done);
+        if (typeof deps.onComponent === "function") {
+            try { deps.onComponent(component); } catch { /* never break overlay open */ }
+        }
+        return component;
+    }, { overlay: true });
+}
+
+/**
+ * Open the navigator and track its dispose hook for session teardown.
+ *
+ * Pi's `ui.custom()` promise resolves to `done()`'s value (`null`), not the
+ * component — so dispose MUST be captured synchronously via `onComponent`.
+ * The active dispose reference is cleared when the overlay promise settles
+ * (fulfill OR reject) and is safe to invoke from session_shutdown while open.
+ *
+ * Settlement cleanup uses `.then(clear, clear)` rather than `.finally(...)`:
+ * `finally` rethrows into a second promise, and `void` does not consume that
+ * rejection — Pi rejects `custom()` when overlay factory/show setup fails, which
+ * would emit `unhandledRejection` (Node 22 exits 1). Both branches are handled
+ * and `clear` never rethrows. Callers (index `openNavigator`) may discard the
+ * returned promise; attach their own handler only if they need the settle value.
+ *
+ * @param {object} ui - pi UI with `custom()`
+ * @param {Array<object>} rows
+ * @param {object} deps - showNavigator deps (matchKey, truncate, getDetail, …)
+ * @param {{ get: () => (undefined|(() => void)), set: (fn: undefined|(() => void)) => void }} disposeSlot
+ * @returns {Promise<unknown>} pi custom() promise (done value on fulfill; rejects if custom() rejects).
+ *   Safe to discard: internal handlers consume both settle paths (no unhandledRejection).
+ */
+export function openTrackedNavigator(ui, rows, deps, disposeSlot) {
+    // Drop any prior overlay's timers before opening a new one (defensive;
+    // pi normally only allows one focused custom overlay at a time).
+    try { disposeSlot.get()?.(); } catch { /* ignore */ }
+    disposeSlot.set(undefined);
+
+    let disposeToken;
+    const opened = showNavigator(ui, rows, {
+        ...deps,
+        onComponent: (component) => {
+            if (typeof deps?.onComponent === "function") {
+                try { deps.onComponent(component); } catch { /* ignore */ }
+            }
+            if (component && typeof component.dispose === "function") {
+                disposeToken = () => {
+                    try { component.dispose(); } catch { /* ignore */ }
+                };
+                disposeSlot.set(disposeToken);
+            }
+        },
+    });
+    // Token-guarded slot cleanup on BOTH settle paths. `.then(clear, clear)`
+    // (not `.finally`) so a rejected custom() does not create a second promise
+    // that rethrows into an unhandledRejection when callers discard the return.
+    const clear = () => {
+        if (disposeSlot.get() === disposeToken) {
+            disposeSlot.set(undefined);
+        }
+    };
+    void Promise.resolve(opened).then(clear, clear);
+    return opened;
+}
+
+/** Invoke and clear a tracked navigator dispose slot (session_shutdown path). */
+export function disposeTrackedNavigator(disposeSlot) {
+    try { disposeSlot.get()?.(); } catch { /* ignore */ }
+    disposeSlot.set(undefined);
 }
 
 // ---------------------------------------------------------------------------
