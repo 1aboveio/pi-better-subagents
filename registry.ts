@@ -36,6 +36,15 @@ export interface RunMeta {
     sandbox?: string;
     /** Whether completion posts the result back to the main session (default true). */
     callback?: boolean;
+    /**
+     * Durable navigator-dismissal timestamp (ms since epoch). Optional and
+     * additive: pre-existing metadata without this field parses unchanged, so
+     * no migration is required. Dismissal is navigator-organization ONLY — it
+     * never deletes logs, prompt, session data, metadata, or id-based tool
+     * access (`subagent_output` / `subagent_result` / `subagent_stop` /
+     * `subagent_list` keep working for dismissed runs).
+     */
+    dismissedAt?: number;
 }
 
 /** Root runtime dir, deliberately OUTSIDE any repo. */
@@ -109,4 +118,45 @@ export function ownedByThisParent(
     parentPid: number = process.pid,
 ): boolean {
     return meta.spawnPid === parentPid;
+}
+
+/** True when the run has been dismissed from the human navigator. */
+export function isDismissed(meta: Pick<RunMeta, "dismissedAt">): boolean {
+    return typeof meta.dismissedAt === "number";
+}
+
+/**
+ * Mark a run dismissed from the navigator, durably. Idempotent: the first
+ * dismissal timestamp wins. Returns the updated meta, or undefined for an
+ * unknown id. Only the timestamp changes — all other metadata is preserved.
+ */
+export function dismissRun(id: string, at: number = Date.now()): RunMeta | undefined {
+    const meta = readMeta(id);
+    if (!meta) return undefined;
+    if (meta.dismissedAt === undefined) {
+        meta.dismissedAt = at;
+        writeMeta(meta);
+    }
+    return meta;
+}
+
+/**
+ * Visible navigator runs: current-parent runs that are not dismissed. This is
+ * the single visibility calculation shared by the navigator list and the
+ * footer count, so they can never drift apart. `subagent_list` does NOT use
+ * this — the model-facing list keeps showing dismissed runs.
+ */
+export function navigatorVisibleRuns(
+    metas: RunMeta[],
+    parentPid: number = process.pid,
+): RunMeta[] {
+    return metas.filter((m) => ownedByThisParent(m, parentPid) && !isDismissed(m));
+}
+
+/** Footer-count seam: how many runs the navigator affordance advertises. */
+export function navigatorVisibleCount(
+    metas: RunMeta[],
+    parentPid: number = process.pid,
+): number {
+    return navigatorVisibleRuns(metas, parentPid).length;
 }
