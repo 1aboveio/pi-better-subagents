@@ -191,6 +191,67 @@ Spend is summed from each finalized assistant turn's `usage` (so multi-turn
 tool-using runs total correctly), and cost comes straight from the model's
 reported per-request cost.
 
+## Subagent navigator (TUI)
+
+In an interactive TUI session, a focused **subagent navigator** lets you inspect
+and organize runs without asking the model to call a tool. It is separate from
+the passive live widget (which stays a compact status signal and never takes
+keyboard focus). Print/RPC modes do not install the navigator; tool access is
+unchanged in every mode.
+
+### Open
+
+- With the editor **empty** and at least one visible current-parent run, press
+  `←` to open the navigator overlay.
+- If the editor contains text, `←` keeps normal cursor-left behavior.
+- While visible runs exist, the default footer shows `← subagents · N`. The
+  hint clears when every visible run is dismissed (or none remain).
+
+### List view
+
+- Newest visible runs first (running and terminal). Dismissed runs are hidden
+  from this list and from the footer count only.
+- Each row: name or id · status · model · elapsed · spend.
+- `↑` / `↓` move selection. Selection stays on the same run across status
+  refreshes when that run is still visible; if it disappears, selection clamps
+  to a remaining row.
+- `enter` opens the live detail view for the selected run.
+- `esc` closes the navigator.
+
+### Detail view
+
+- Shows status, model, elapsed, current/used tools, spend, and parsed output.
+  The view refreshes about once per second while open.
+- `←` returns to the list (selection restored on the viewed run when still
+  visible).
+- `esc` closes the entire navigator.
+
+### Two-press `x` close
+
+- First `x` on the selected (list) or viewed (detail) run arms close for three
+  seconds and shows a footer hint: `x again to stop <name>` while running, or
+  `x again to dismiss <name>` when terminal.
+- Second `x` within the window, on the **same** run, acts:
+  - **Running** — stop the process group (shared `subagent_stop` semantics),
+    mark killed, then dismiss from the navigator.
+  - **Terminal** — dismiss only; terminal status is not rewritten.
+- Changing selection, leaving the view, closing the overlay, arming timeout,
+  reload, and session teardown all disarm close and clear the confirm hint.
+
+### Dismissal is navigator-only
+
+Dismissed runs leave the navigator list and footer count. Logs, prompt, session
+data, metadata, and id-based tool access stay intact. `subagent_list`,
+`subagent_output`, `subagent_result`, and `subagent_stop` still resolve dismissed
+run ids. Dismissal survives `/reload` as dismissed in the navigator.
+
+### Reload and teardown
+
+`/reload` and session restart reinstall the empty-editor wrapper without stacking
+duplicate handlers, republish the footer count, and clear any leftover overlay
+timers or close-confirm state. Session shutdown disposes open navigator timers
+and clears navigator footer statuses (TUI only).
+
 ## Design notes
 
 - Runtime lives outside any repo, under `$TMPDIR/pi-better-subagents/`
