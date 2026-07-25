@@ -101,7 +101,8 @@ run_sandboxed_bash() {
 }
 
 # build_sandbox_command PROFILE WRITABLE_DIR PI_BIN PI_ARG...
-#   Emits the exact product-selected command and argv, one argument per line.
+#   Emits the exact product-selected command and argv as a JSON array. JSON
+#   preserves embedded newlines in individual argv tokens.
 #   Calling sandbox.ts directly keeps Linux bubblewrap test execution coupled to
 #   the same backend selection and wrapper construction that subagent_spawn uses.
 build_sandbox_command() {
@@ -122,8 +123,38 @@ build_sandbox_command() {
             piArgs,
         }, { sandboxEnabled: true, explicitSandbox: true });
         if (!command) throw new Error("sandbox backend did not produce a wrapper command");
-        process.stdout.write([command.file, ...command.fileArgs].join("\n") + "\n");
+        process.stdout.write(JSON.stringify([command.file, ...command.fileArgs]));
     ' "$profile" "$writable_dir" "$HOME" "$pi_bin" "$@"
+}
+
+# read_sandbox_command FILE
+#   Rebuilds the command array emitted by build_sandbox_command without using
+#   newline as an argv delimiter. POSIX argv cannot contain NUL, so it is safe
+#   as the decoded record separator for Bash.
+read_sandbox_command() {
+    local wrapper="$1" decoded="$1.argv" arg
+    # shellcheck disable=SC2016 # Node expands the template literal, not Bash.
+    if ! node -e '
+        const input = require("node:fs").readFileSync(0, "utf8");
+        let argv;
+        try {
+            argv = JSON.parse(input);
+            if (!Array.isArray(argv) || argv.some((arg) => typeof arg !== "string" || arg.includes("\0"))) {
+                throw new Error("expected an array of NUL-free strings");
+            }
+        } catch (error) {
+            console.error(`invalid sandbox command transport: ${error.message}`);
+            process.exit(1);
+        }
+        for (const arg of argv) process.stdout.write(`${arg}\0`);
+    ' < "$wrapper" > "$decoded"; then
+        rm -f "$decoded"
+        return 1
+    fi
+
+    command=()
+    while IFS= read -r -d '' arg; do command+=("$arg"); done < "$decoded"
+    rm -f "$decoded"
 }
 
 # run_child ID TOOLS PROMPT [SANDBOX_DIR]
@@ -169,8 +200,10 @@ run_child() {
             echo "  FAIL: product sandbox command construction failed" >&2
             return 1
         fi
-        command=()
-        while IFS= read -r arg; do command+=("$arg"); done < "$wrapper"
+        if ! read_sandbox_command "$wrapper"; then
+            echo "  FAIL: product sandbox command reconstruction failed" >&2
+            return 1
+        fi
         if [ "${#command[@]}" -eq 0 ]; then
             echo "  FAIL: product sandbox command was empty" >&2
             return 1
