@@ -18,7 +18,12 @@ import { constants as bufferConstants } from "node:buffer";
 import { parseRun, tailLog, formatSubagentOutputBody, formatSubagentResultBody } from "../parse.ts";
 import { logPathFor, runDir } from "../registry.ts";
 
-const RUN_ID = "sa_parse_test_001";
+// Separate run IDs for the parseRun and tailLog suites. node:test runs
+// top-level describe blocks concurrently by default, so sharing a single ID
+// caused file-system races between the two suites (e.g. one suite's after()
+// cleanup deleting the log while the other suite's test was about to read it).
+const PARSE_RUN_ID = "sa_parse_test_001";
+const TAIL_RUN_ID = "sa_parse_test_002";
 
 function writeLog(id, lines) {
     mkdirSync(runDir(id), { recursive: true });
@@ -48,18 +53,18 @@ function event(type, extra = {}) {
 }
 
 describe("parseRun", () => {
-    before(() => cleanup(RUN_ID));
-    after(() => cleanup(RUN_ID));
+    before(() => cleanup(PARSE_RUN_ID));
+    after(() => cleanup(PARSE_RUN_ID));
 
     it("parses a completed run final answer from a small full log", () => {
-        writeLog(RUN_ID, [
+        writeLog(PARSE_RUN_ID, [
             '[pi-warp] banner',
             event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "first" }], usage: { input: 10, output: 5, cost: { total: 0.001 } } } }),
             event("tool_execution_start", { toolName: "bash" }),
             event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "second" }], usage: { input: 20, output: 8, cost: { total: 0.002 } } } }),
             event("agent_end", { messages: [{ role: "user", content: "ok" }, { role: "assistant", content: [{ type: "text", text: "final" }] }] }),
         ]);
-        const r = parseRun(RUN_ID);
+        const r = parseRun(PARSE_RUN_ID);
         assert.equal(r.finalText, "final");
         assert.equal(r.lastActivity, "second");
         assert.deepEqual(r.toolCalls, ["bash"]);
@@ -71,12 +76,12 @@ describe("parseRun", () => {
     });
 
     it("falls back to the last assistant message for failed/killed logs without agent_end", () => {
-        writeLog(RUN_ID, [
+        writeLog(PARSE_RUN_ID, [
             event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "partial answer" }], usage: { input: 5, output: 3 } } }),
             event("tool_execution_start", { toolName: "bash" }),
             event("tool_execution_start", { toolName: "bash" }), // adjacent dedupe
         ]);
-        const r = parseRun(RUN_ID);
+        const r = parseRun(PARSE_RUN_ID);
         assert.equal(r.finalText, "partial answer");
         assert.equal(r.lastActivity, "partial answer");
         assert.equal(r.sawEnd, false);
@@ -91,8 +96,8 @@ describe("parseRun", () => {
             event("message_update", { message: { role: "assistant", content: [{ type: "text", text: "recent streaming" }] } }),
         ].join("\n");
         const noise = "x".repeat(5000) + "\n";
-        writeLog(RUN_ID, [noise, tail]);
-        const r = parseRun(RUN_ID);
+        writeLog(PARSE_RUN_ID, [noise, tail]);
+        const r = parseRun(PARSE_RUN_ID);
         delete process.env.PI_SUBAGENT_MAX_LOG_PARSE_BYTES;
 
         assert.ok(r.toolCalls.includes("tool-19"), "recent tool event must be present");
@@ -104,23 +109,23 @@ describe("parseRun", () => {
     it("does not throw ERR_STRING_TOO_LONG on a sparse log larger than MAX_STRING_LENGTH", () => {
         const MAX = bufferConstants.MAX_STRING_LENGTH;
         const tail = event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "tail answer" }], usage: { input: 1, output: 1 } } });
-        makeSparseLog(RUN_ID, MAX + 1024, tail);
+        makeSparseLog(PARSE_RUN_ID, MAX + 1024, tail);
 
         let r;
         assert.doesNotThrow(() => {
-            r = parseRun(RUN_ID);
+            r = parseRun(PARSE_RUN_ID);
         });
         assert.equal(r.finalText, "tail answer");
         assert.ok(r.diagnostics.some((d) => /truncated/i.test(d)), "must report truncation for oversized log");
     });
 
     it("reports explicit diagnostics when no parseable events are found", () => {
-        writeLog(RUN_ID, [
+        writeLog(PARSE_RUN_ID, [
             "Warning: No project session",
             "some stderr noise",
             "not json",
         ]);
-        const r = parseRun(RUN_ID);
+        const r = parseRun(PARSE_RUN_ID);
         assert.equal(r.finalText, "");
         assert.equal(r.lastActivity, "");
         assert.equal(r.toolCalls.length, 0);
@@ -130,8 +135,8 @@ describe("parseRun", () => {
     it("reports truncation diagnostics with correct byte units", () => {
         process.env.PI_SUBAGENT_MAX_LOG_PARSE_BYTES = "1024";
         const bigLine = event("message_update", { message: { role: "assistant", content: [{ type: "text", text: "x".repeat(2000) }] } });
-        writeLog(RUN_ID, [bigLine]);
-        const r = parseRun(RUN_ID);
+        writeLog(PARSE_RUN_ID, [bigLine]);
+        const r = parseRun(PARSE_RUN_ID);
         delete process.env.PI_SUBAGENT_MAX_LOG_PARSE_BYTES;
 
         const diag = r.diagnostics.find((d) => /truncated/i.test(d));
@@ -143,27 +148,27 @@ describe("parseRun", () => {
 });
 
 describe("tailLog", () => {
-    before(() => cleanup(RUN_ID));
-    after(() => cleanup(RUN_ID));
+    before(() => cleanup(TAIL_RUN_ID));
+    after(() => cleanup(TAIL_RUN_ID));
 
     it("returns the last n lines of a log", () => {
-        writeLog(RUN_ID, ["line 1", "line 2", "line 3", "line 4"]);
-        assert.equal(tailLog(RUN_ID, 2), "line 3\nline 4");
-        assert.equal(tailLog(RUN_ID, 1), "line 4");
+        writeLog(TAIL_RUN_ID, ["line 1", "line 2", "line 3", "line 4"]);
+        assert.equal(tailLog(TAIL_RUN_ID, 2), "line 3\nline 4");
+        assert.equal(tailLog(TAIL_RUN_ID, 1), "line 4");
     });
 
     it("returns '(no output yet)' for an empty or missing log", () => {
-        cleanup(RUN_ID);
-        assert.equal(tailLog(RUN_ID, 10), "(no output yet)");
-        writeLog(RUN_ID, [""]);
-        assert.equal(tailLog(RUN_ID, 10), "(no output yet)");
+        cleanup(TAIL_RUN_ID);
+        assert.equal(tailLog(TAIL_RUN_ID, 10), "(no output yet)");
+        writeLog(TAIL_RUN_ID, [""]);
+        assert.equal(tailLog(TAIL_RUN_ID, 10), "(no output yet)");
     });
 
     it("avoids whole-file reads on logs larger than MAX_STRING_LENGTH", () => {
         const MAX = bufferConstants.MAX_STRING_LENGTH;
         const tail = ["recent 1", "recent 2", "recent 3"].join("\n");
-        makeSparseLog(RUN_ID, MAX + 1024, tail);
-        assert.equal(tailLog(RUN_ID, 2), "recent 2\nrecent 3");
+        makeSparseLog(TAIL_RUN_ID, MAX + 1024, tail);
+        assert.equal(tailLog(TAIL_RUN_ID, 2), "recent 2\nrecent 3");
     });
 
     it("preserves partial raw bytes when a single line exceeds the raw tail window", () => {
@@ -174,10 +179,10 @@ describe("tailLog", () => {
         const suffix = ":::END_OF_BIG_EVENT:::";
         const payload = marker + "x".repeat(300072 - marker.length - suffix.length - 1) + suffix;
         const hugeLine = JSON.stringify({ type: "tool_execution_end", toolName: "big_tool", output: payload }) + "\n";
-        mkdirSync(runDir(RUN_ID), { recursive: true });
-        writeFileSync(logPathFor(RUN_ID), hugeLine, "utf-8");
+        mkdirSync(runDir(TAIL_RUN_ID), { recursive: true });
+        writeFileSync(logPathFor(TAIL_RUN_ID), hugeLine, "utf-8");
 
-        const raw = tailLog(RUN_ID, 40);
+        const raw = tailLog(TAIL_RUN_ID, 40);
         assert.notEqual(raw, "(no output yet)", "raw tail must not be empty when bytes exist");
         assert.ok(raw.includes(suffix), `raw tail must preserve the end of the huge line, got length ${raw.length}`);
 
