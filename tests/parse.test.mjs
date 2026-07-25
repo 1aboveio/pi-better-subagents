@@ -13,17 +13,21 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, openSync, closeSync, writeSync, ftruncateSync, unlinkSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, openSync, closeSync, writeSync, ftruncateSync, unlinkSync, rmSync, existsSync } from "node:fs";
 import { constants as bufferConstants } from "node:buffer";
 import { parseRun, tailLog, formatSubagentOutputBody, formatSubagentResultBody } from "../parse.ts";
 import { logPathFor, runDir } from "../registry.ts";
 
-// Separate run IDs for the parseRun and tailLog suites. node:test runs
-// top-level describe blocks concurrently by default, so sharing a single ID
-// caused file-system races between the two suites (e.g. one suite's after()
-// cleanup deleting the log while the other suite's test was about to read it).
-const PARSE_RUN_ID = "sa_parse_test_001";
-const TAIL_RUN_ID = "sa_parse_test_002";
+// Per-process, per-invocation run IDs for the parseRun and tailLog suites.
+// node:test runs top-level describe blocks concurrently by default, and
+// separate focused `node --test` invocations run in independent processes, so
+// fixed IDs collided on both cross-suite and cross-process runs. Each process
+// now owns its fixture directories and cleans up only those it created.
+function uniqueRunId(prefix) {
+    return `${prefix}_${process.pid}_${Date.now()}_${Math.floor(Math.random() * 1e9).toString(36)}`;
+}
+const PARSE_RUN_ID = uniqueRunId("sa_parse_test_parse");
+const TAIL_RUN_ID = uniqueRunId("sa_parse_test_tail");
 
 function writeLog(id, lines) {
     mkdirSync(runDir(id), { recursive: true });
@@ -55,6 +59,14 @@ function event(type, extra = {}) {
 describe("parseRun", () => {
     before(() => cleanup(PARSE_RUN_ID));
     after(() => cleanup(PARSE_RUN_ID));
+
+    it("uses process-unique run IDs to avoid cross-process fixture collisions", () => {
+        assert.notEqual(PARSE_RUN_ID, TAIL_RUN_ID);
+        assert.ok(PARSE_RUN_ID.includes(String(process.pid)), "parse run ID must include process pid");
+        assert.ok(TAIL_RUN_ID.includes(String(process.pid)), "tail run ID must include process pid");
+        assert.ok(!existsSync(runDir(PARSE_RUN_ID)), "parse run dir must not exist before setup");
+        assert.ok(!existsSync(runDir(TAIL_RUN_ID)), "tail run dir must not exist before setup");
+    });
 
     it("parses a completed run final answer from a small full log", () => {
         writeLog(PARSE_RUN_ID, [
@@ -132,7 +144,7 @@ describe("parseRun", () => {
         assert.ok(r.diagnostics.some((d) => /No parseable assistant\/tool events/i.test(d)), "must surface parse-empty diagnostic");
     });
 
-    it("reports truncation diagnostics with correct byte units", () => {
+    it("reports truncation diagnostics with correct byte units for a small parse window", () => {
         process.env.PI_SUBAGENT_MAX_LOG_PARSE_BYTES = "1024";
         const bigLine = event("message_update", { message: { role: "assistant", content: [{ type: "text", text: "x".repeat(2000) }] } });
         writeLog(PARSE_RUN_ID, [bigLine]);
@@ -144,6 +156,25 @@ describe("parseRun", () => {
         assert.ok(diag.includes("1.0 KB"), `diagnostic must report parse window as 1.0 KB, got: ${diag}`);
         assert.ok(!diag.includes("1.0 MB"), `diagnostic must not misreport bytes as MB, got: ${diag}`);
         assert.ok(!diag.includes("GB"), `diagnostic must not misreport bytes as GB, got: ${diag}`);
+    });
+
+    it("pins the default 32.0 MB truncation diagnostic wording", () => {
+        const original = process.env.PI_SUBAGENT_MAX_LOG_PARSE_BYTES;
+        delete process.env.PI_SUBAGENT_MAX_LOG_PARSE_BYTES;
+        try {
+            const totalBytes = 32 * 1024 * 1024 + 1024;
+            const tail = event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "tail answer" }], usage: { input: 1, output: 1 } } });
+            makeSparseLog(PARSE_RUN_ID, totalBytes, tail);
+
+            const r = parseRun(PARSE_RUN_ID);
+            assert.equal(r.finalText, "tail answer");
+            assert.deepEqual(r.diagnostics, [
+                "Log truncated: parsed last 32.0 MB of 32.0 MB. Only recent activity is reflected in tokens/tools.",
+            ]);
+        } finally {
+            if (original !== undefined) process.env.PI_SUBAGENT_MAX_LOG_PARSE_BYTES = original;
+            else delete process.env.PI_SUBAGENT_MAX_LOG_PARSE_BYTES;
+        }
     });
 });
 
