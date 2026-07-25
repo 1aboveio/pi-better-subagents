@@ -160,6 +160,31 @@ describe('formatCallbackQuiet', () => {
 
 // ── buildCompletionDelivery behavior tests ────────────────────────────────────
 describe('buildCompletionDelivery', () => {
+    // @covers subagent.completion-callback
+    // @level unit
+    // @fails-without-fix subagent.completion-callback
+    it('incomplete child exits use unexpected-exit wording, not successful completion wording', () => {
+        const d = buildCompletionDelivery({
+            id: 'sa_incomplete', label: 'worker (sa_incomplete)', verdict: '! incomplete child exit (exit 0)',
+            stat: '14s', callback: true, incomplete: true,
+        });
+
+        assert.match(d.content, /unexpectedly/i);
+        assert.doesNotMatch(d.content, /has returned|completed/i);
+    });
+
+    // @covers subagent.completion-callback
+    // @level unit
+    it('quiet incomplete child exits do not imply a successful completion', () => {
+        const d = buildCompletionDelivery({
+            id: 'sa_incomplete_quiet', label: 'worker', verdict: '! incomplete child exit (exit 0)',
+            stat: '14s', callback: false, incomplete: true,
+        });
+
+        assert.match(d.content, /ended unexpectedly/i);
+        assert.doesNotMatch(d.content, /completed|result NOT auto-posted/i);
+    });
+
     it('callback:true delivery content never contains resultText sentinel', () => {
         const sentinel = 'UNIQUE_FULL_RESULT_BODY_' + 'x'.repeat(200);
         const d = buildCompletionDelivery({
