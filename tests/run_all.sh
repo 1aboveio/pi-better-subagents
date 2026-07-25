@@ -12,7 +12,13 @@
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-tests=("$DIR/test_web_fetch.sh" "$DIR/test_gh_issues.sh" "$DIR/test_env_inherit.sh")
+tests=(
+    "$DIR/test_sandbox_applied.sh"
+    "$DIR/test_sandbox_deny_outside.sh"
+    "$DIR/test_web_fetch.sh"
+    "$DIR/test_gh_issues.sh"
+    "$DIR/test_env_inherit.sh"
+)
 declare -a results
 fail=0
 
