@@ -1,0 +1,20 @@
+{
+  "unit": "#103",
+  "headNote": "pre-commit; refreshed after final commit",
+  "results": [
+    {
+      "surface": "git_remotes.read",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types -e '<inline multi-pushurl read+sync+push smoke>'",
+      "observed": "SMOKE PASS: git_remotes multi-pushurl read+sync+push reached both destinations"
+    },
+    {
+      "surface": "git_remotes.sync",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types -e '<inline multi-pushurl read+sync+push smoke>'",
+      "observed": "SMOKE PASS: git_remotes multi-pushurl read+sync+push reached both destinations; push1 and push2 both received branch smoke"
+    }
+  ]
+}
