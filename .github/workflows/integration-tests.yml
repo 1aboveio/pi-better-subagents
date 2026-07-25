@@ -32,10 +32,10 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch'
       || startsWith(github.head_ref, 'mergify/merge-queue/')
-    # macOS until https://github.com/1aboveio/pi-better-subagents/issues/5
-    # (Linux sandbox). The queue suite itself (web_fetch + gh) does not need
-    # sandbox-exec, but staying on macOS keeps full run_all.sh available later.
-    runs-on: macos-latest
+    # This queue suite (web_fetch + gh) is Linux-compatible and does not need
+    # sandbox-exec. The broader sandbox-dependent suite remains blocked by
+    # https://github.com/1aboveio/pi-better-subagents/issues/5.
+    runs-on: [self-hosted, Linux, X64, docker]
     timeout-minutes: 30
     permissions:
       contents: read
@@ -47,6 +47,27 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Ensure GitHub CLI is installed
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            exit 0
+          fi
+          version=2.96.0
+          archive="gh_${version}_linux_amd64.tar.gz"
+          archive_path="$RUNNER_TEMP/$archive"
+          curl -fsSL \
+            "https://github.com/cli/cli/releases/download/v${version}/${archive}" \
+            -o "$archive_path"
+          expected=83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60
+          actual=$(sha256sum "$archive_path" | awk '{print $1}')
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::GitHub CLI archive checksum mismatch"
+            exit 1
+          fi
+          tar -xzf "$archive_path" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/gh_${version}_linux_amd64/bin" >> "$GITHUB_PATH"
 
       - name: Install pi CLI
         run: npm install -g @earendil-works/pi-coding-agent
