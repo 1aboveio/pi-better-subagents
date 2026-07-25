@@ -1,0 +1,1 @@
+fix(queue): enable Ubuntu AppArmor user namespaces and verify real bwrap initialization before required confinement proof
