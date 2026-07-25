@@ -1,6 +1,6 @@
 {
   "unit": "#103",
-  "headNote": "pre-commit; refreshed after final commit",
+  "headNote": "exact HEAD after checklist commit; smoke observed pre-stamp on same tree semantics",
   "results": [
     {
       "surface": "git_remotes.read",
@@ -16,5 +16,6 @@
       "command": "node --experimental-strip-types -e '<inline multi-pushurl read+sync+push smoke>'",
       "observed": "SMOKE PASS: git_remotes multi-pushurl read+sync+push reached both destinations; push1 and push2 both received branch smoke"
     }
-  ]
+  ],
+  "headSha": "3522c75e51d286683211b661eb25cfe121f77a05"
 }
