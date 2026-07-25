@@ -61,16 +61,30 @@ function initBare(path) {
     return path;
 }
 
+function configureIdentity(path) {
+    // CI runners have no global user.name/email; clones do not inherit the
+    // source repo's local identity, so commits on the target would fail.
+    runGit(path, ["config", "user.email", "test@example.com"]);
+    runGit(path, ["config", "user.name", "Test"]);
+}
+
 function initRepo(path, { branch = "main" } = {}) {
     mkdirSync(path, { recursive: true });
     runGit(path, ["init"]);
     runGit(path, ["checkout", "-b", branch]);
-    runGit(path, ["config", "user.email", "test@example.com"]);
-    runGit(path, ["config", "user.name", "Test"]);
+    configureIdentity(path);
     writeFileSync(join(path, "a.txt"), "a\n");
     runGit(path, ["add", "a.txt"]);
     runGit(path, ["commit", "-m", "first"]);
     return path;
+}
+
+/** Clone `source` into `base/name` and configure a local commit identity. */
+function cloneWithIdentity(base, source, name = "clone") {
+    runGit(base, ["clone", source, name]);
+    const target = join(base, name);
+    configureIdentity(target);
+    return target;
 }
 
 function pushUrlsAll(dir, remote = "origin") {
@@ -222,8 +236,7 @@ describe("git_remotes.sync", () => {
 
             // Simulate a path-style clone whose origin points at the parent working tree
             // and which may carry a single stale pushurl / extra remote.
-            const target = join(base, "clone");
-            runGit(base, ["clone", source, "clone"]);
+            const target = cloneWithIdentity(base, source, "clone");
             // Path clone sets origin → source working tree. Add a stale remote too.
             runGit(target, ["remote", "add", "stale-only", join(base, "nowhere.git")]);
             // Give the clone a single wrong pushurl so sync must replace, not append-only.
@@ -294,8 +307,7 @@ describe("git_remotes.sync", () => {
             runGit(source, ["remote", "add", "mirror", mirrorBare]);
             runGit(source, ["push", "-u", "origin", "HEAD"]);
 
-            const target = join(base, "clone");
-            runGit(base, ["clone", source, "clone"]);
+            const target = cloneWithIdentity(base, source, "clone");
             // Path-style origin points at source; invent an extra remote.
             runGit(target, ["remote", "add", "extra", join(base, "extra.git")]);
 
@@ -326,8 +338,7 @@ describe("git_remotes.sync", () => {
             runGit(source, ["remote", "add", "origin", originBare]);
             runGit(source, ["push", "-u", "origin", "HEAD"]);
 
-            const target = join(base, "clone");
-            runGit(base, ["clone", source, "clone"]);
+            const target = cloneWithIdentity(base, source, "clone");
             // Give the clone a leftover distinct pushurl that source does not have.
             const leftover = join(base, "leftover.git");
             initBare(leftover);
@@ -370,8 +381,7 @@ describe("git_remotes.sync", () => {
             runGit(source, ["remote", "set-url", "--push", "origin", pushRemote]);
             runGit(source, ["push", "origin", "HEAD"]);
 
-            const target = join(base, "clone");
-            runGit(base, ["clone", source, "clone"]);
+            const target = cloneWithIdentity(base, source, "clone");
             syncGitRemotes(source, target);
 
             assert.equal(runGit(target, ["remote", "get-url", "origin"]), fetchRemote);
