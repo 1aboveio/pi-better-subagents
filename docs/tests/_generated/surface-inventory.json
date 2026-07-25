@@ -77,6 +77,13 @@
       "class": "mutation",
       "path": "stop.ts",
       "reachable": true
+    },
+    {
+      "id": "tools.model-facing",
+      "kind": "service",
+      "class": "mutation",
+      "path": "tools.ts",
+      "reachable": true
     }
   ]
 }

@@ -6,8 +6,10 @@
  *   metadata without the field keeps parsing (no migration).
  * - AC2/AC3: visible navigator runs = current-parent runs that are not
  *   dismissed; the footer count is the same set's size.
- * - AC4: dismissed runs remain accessible by ID (readMeta, stopRun).
- * - AC5: listMetas (what subagent_list reads) still returns dismissed runs.
+ * - AC4: dismissed runs remain accessible by ID through the REGISTERED
+ *   model-facing tool handlers (subagent_output / subagent_result /
+ *   subagent_stop) — the exact execute functions pi registration uses.
+ * - AC5: the registered subagent_list handler still returns dismissed runs.
  * - AC6/AC7: stopRun is the shared stop path — it rereads meta + effective
  *   status before acting, so stale state never causes a wrong termination.
  *
@@ -16,6 +18,8 @@
  * // @covers registry.navigator-visibility
  * // @level unit
  * // @covers stop.shared
+ * // @level unit
+ * // @covers tools.model-facing
  * // @level unit
  */
 import { describe, it, after } from "node:test";
@@ -34,6 +38,12 @@ import {
 } from "../registry.ts";
 import { stopRun } from "../stop.ts";
 import { processExists } from "../spawn.ts";
+import {
+    subagentListTool,
+    subagentOutputTool,
+    subagentResultTool,
+    subagentStopTool,
+} from "../tools.ts";
 
 const THIS_PID = process.pid;
 const FOREIGN_PID = THIS_PID + 1;
@@ -174,26 +184,130 @@ describe("navigator visibility", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC4/AC5 — dismissed runs stay accessible by ID; list keeps them
+// AC4/AC5 — dismissed-run compatibility through the REGISTERED model-facing
+// tool handlers. These tests invoke the exact execute functions that index.ts
+// passes to pi.registerTool (built by the factories in tools.ts), so a
+// handler-level dismissal filter would fail here, not just at the registry.
 // ---------------------------------------------------------------------------
-describe("dismissed-run tool compatibility", () => {
+
+/**
+ * Stub for @earendil-works/pi-ai's Type. The parameters schema is inert data
+ * as far as the handler is concerned — the stub keeps tools.ts loadable
+ * without the pi runtime package installed. Registration in index.ts passes
+ * the real Type; the execute function under test is identical either way.
+ */
+const TypeStub = {
+    Object: (v) => v,
+    String: (v) => v,
+    Number: (v) => v,
+    Boolean: (v) => v,
+    Array: (v) => v,
+    Optional: (v) => v,
+};
+
+/** The registered tool definitions, built the same way index.ts builds them. */
+function registeredTools() {
+    const stoppedNotifications = [];
+    return {
+        list: subagentListTool(TypeStub),
+        output: subagentOutputTool(TypeStub),
+        result: subagentResultTool(TypeStub),
+        stop: subagentStopTool(TypeStub, { onStopped: () => stoppedNotifications.push(true) }),
+        stoppedNotifications,
+    };
+}
+
+/** Tool results use pi's { content: [{ type: "text", text }] } shape. */
+function resultText(result) {
+    return result.content[0].text;
+}
+
+describe("dismissed-run model-facing tool compatibility", () => {
+    // @covers tools.model-facing
     // @covers registry.dismissal
     // @level unit
-    it("readMeta still resolves a dismissed run by id (output/result recovery)", () => {
+    it("registered subagent_list handler still lists a dismissed run", async () => {
+        const id = trackDisk(`sa_t44_hlist_${Date.now()}`);
+        writeMeta(meta({ id }));
+        dismissRun(id);
+        const tools = registeredTools();
+        const out = resultText(await tools.list.execute("tc", {}));
+        assert.ok(out.includes(id), `subagent_list output must include the dismissed run; got:\n${out}`);
+    });
+
+    // @covers tools.model-facing
+    // @covers registry.dismissal
+    // @level unit
+    it("registered subagent_output handler resolves a dismissed run by id", async () => {
+        const id = trackDisk(`sa_t44_hout_${Date.now()}`);
+        writeMeta(meta({ id }));
+        dismissRun(id);
+        const tools = registeredTools();
+        const out = resultText(await tools.output.execute("tc", { id }));
+        assert.ok(out.startsWith(`[${id} · completed`), `subagent_output must head with the run id + status; got:\n${out}`);
+    });
+
+    // @covers tools.model-facing
+    // @covers registry.dismissal
+    // @level unit
+    it("registered subagent_result handler returns a finished dismissed run's result", async () => {
+        const id = trackDisk(`sa_t44_hres_${Date.now()}`);
+        writeMeta(meta({ id, exitCode: 0 }));
+        dismissRun(id);
+        const tools = registeredTools();
+        const out = resultText(await tools.result.execute("tc", { id }));
+        assert.ok(out.startsWith(`[${id} · completed · exit 0`), `subagent_result must head with id + status + exit; got:\n${out}`);
+    });
+
+    // @covers tools.model-facing
+    // @covers registry.dismissal
+    // @level unit
+    it("registered subagent_result handler reports a dismissed still-running run without erroring", async () => {
+        const id = trackDisk(`sa_t44_hrun_${Date.now()}`);
+        // pid = this test process: alive, so effective status stays "running".
+        writeMeta(meta({ id, status: "running", pid: THIS_PID }));
+        dismissRun(id);
+        const tools = registeredTools();
+        const out = resultText(await tools.result.execute("tc", { id }));
+        assert.ok(out.includes("still running"), `expected the non-blocking still-running reply; got:\n${out}`);
+    });
+
+    // @covers tools.model-facing
+    // @covers stop.shared
+    // @covers registry.dismissal
+    // @level unit
+    it("registered subagent_stop handler stops a dismissed run (dismissal is not deletion)", async () => {
+        const id = trackDisk(`sa_t44_hstop_${Date.now()}`);
+        const pid = spawnSleeper();
+        writeMeta(meta({ id, status: "running", pid }));
+        dismissRun(id);
+        const tools = registeredTools();
+        const out = resultText(await tools.stop.execute("tc", { id }));
+        assert.ok(out.includes(`Stopped subagent ${id}`), `expected the stop confirmation; got:\n${out}`);
+        assert.equal(tools.stoppedNotifications.length, 1, "stop handler must fire its onStopped UI callback");
+        const back = readMeta(id);
+        assert.equal(back.status, "killed");
+        assert.equal(isDismissed(back), true, "dismissal survives the stop");
+        assert.equal(await waitFor(() => !processExists(pid)), true, "process group must be gone");
+    });
+
+    // @covers tools.model-facing
+    // @level unit
+    it("registered output/result handlers throw Unknown run id for missing ids", async () => {
+        const tools = registeredTools();
+        await assert.rejects(() => tools.output.execute("tc", { id: "sa_t44_missing" }), /Unknown run id/);
+        await assert.rejects(() => tools.result.execute("tc", { id: "sa_t44_missing" }), /Unknown run id/);
+    });
+
+    // @covers registry.dismissal
+    // @level unit
+    it("registry pin: readMeta/listMetas still resolve dismissed runs (what the handlers read)", () => {
         const id = trackDisk(`sa_t44_recover_${Date.now()}`);
         writeMeta(meta({ id }));
         dismissRun(id);
         const back = readMeta(id);
         assert.ok(back, "dismissed run must remain readable by id");
         assert.equal(isDismissed(back), true);
-    });
-
-    // @covers registry.dismissal
-    // @level unit
-    it("listMetas still includes dismissed runs (subagent_list unchanged)", () => {
-        const id = trackDisk(`sa_t44_list_${Date.now()}`);
-        writeMeta(meta({ id }));
-        dismissRun(id);
         const listed = listMetas().find((m) => m.id === id);
         assert.ok(listed, "dismissed run must not be hidden from listMetas");
         assert.equal(isDismissed(listed), true);
