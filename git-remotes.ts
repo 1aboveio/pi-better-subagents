@@ -169,37 +169,26 @@ function applyPushUrls(
     clearAllPushUrls(dir, name, existing);
 
     if (desired.length === 0) {
-        // Desired is empty: after clear, Git's default (push → fetch URL) holds.
-        // If anything remains (e.g. --delete unsupported), force default-equivalent.
+        // Desired is empty: after unset-all, Git's default (push → fetch URL) holds.
+        // `get-url --push --all` reports the fetch URL when no pushurl key exists,
+        // so treat a single remaining entry equal to fetch as already-default.
         const remaining = safePushUrlsAll(dir, name);
         const fetchUrl = safeFetchUrl(dir, name);
-        if (remaining.length > 0 && fetchUrl) {
-            // Remaining multi-set still cannot take a plain set-url --push; delete
-            // each leftover first, then (if needed) set once equal to fetch.
-            clearAllPushUrls(dir, name, remaining);
-            const still = safePushUrlsAll(dir, name);
-            if (still.length === 1 && still[0] !== fetchUrl) {
-                runGit(dir, ["remote", "set-url", "--push", name, fetchUrl]);
-            } else if (still.length === 0) {
-                // Clean default — nothing to do.
-            } else if (still.length === 1 && still[0] === fetchUrl) {
-                // pushurl == fetch is default-equivalent; try delete once.
-                try {
-                    runGit(dir, ["remote", "set-url", "--push", "--delete", name, fetchUrl]);
-                } catch {
-                    // Accept pushurl == fetch as default-equivalent.
-                }
-            } else if (still.length > 1) {
-                // Last resort: set-url still fails on multi; leave as-is only if
-                // every entry already equals fetch (unusual). Otherwise throw so
-                // callers do not silently keep stale destinations.
-                const allFetch = still.every((u) => u === fetchUrl);
-                if (!allFetch) {
-                    throw new Error(
-                        `unable to clear multi-valued remote.${name}.pushurl in ${dir}`,
-                    );
-                }
-            }
+        const isDefaultOnly =
+            remaining.length === 0 ||
+            (remaining.length === 1 && fetchUrl !== undefined && remaining[0] === fetchUrl);
+        if (isDefaultOnly) return;
+
+        // Retry once if values somehow remain (should not happen after unset-all).
+        clearAllPushUrls(dir, name, remaining);
+        const still = safePushUrlsAll(dir, name);
+        const stillDefaultOnly =
+            still.length === 0 ||
+            (still.length === 1 && fetchUrl !== undefined && still[0] === fetchUrl);
+        if (!stillDefaultOnly) {
+            throw new Error(
+                `unable to clear multi-valued remote.${name}.pushurl in ${dir}`,
+            );
         }
         return;
     }
@@ -212,34 +201,20 @@ function applyPushUrls(
     }
 }
 
-/** Delete every known pushurl for `name`. Tolerates already-removed entries. */
-function clearAllPushUrls(dir: string, name: string, urls: string[]): void {
-    // Prefer the live multi-value list so we do not miss entries `existing`
-    // was stale relative to (or duplicates). Fall back to the provided list.
-    const live = safePushUrlsAll(dir, name);
-    const toClear = live.length > 0 ? live : urls;
-    for (const url of toClear) {
-        try {
-            runGit(dir, ["remote", "set-url", "--push", "--delete", name, url]);
-        } catch {
-            // Older Git / already-removed entry: ignore and continue.
-        }
-    }
-    // If --delete matched by value left siblings (duplicate values), sweep again
-    // from a fresh read until empty or no progress.
-    for (let guard = 0; guard < 16; guard++) {
-        const remaining = safePushUrlsAll(dir, name);
-        if (remaining.length === 0) return;
-        let deleted = 0;
-        for (const url of remaining) {
-            try {
-                runGit(dir, ["remote", "set-url", "--push", "--delete", name, url]);
-                deleted++;
-            } catch {
-                // ignore
-            }
-        }
-        if (deleted === 0) return;
+/**
+ * Delete every configured pushurl for `name` as a complete set.
+ *
+ * Must NOT use `git remote set-url --push --delete <name> <url>`: that treats
+ * the final argument as a regex, so legal local paths containing unmatched
+ * metacharacters (e.g. `[`) fail to match and leave stale destinations intact.
+ * `git config --unset-all remote.<name>.pushurl` drops the multi-valued key
+ * wholesale without interpreting URL text as a pattern.
+ */
+function clearAllPushUrls(dir: string, name: string, _urls: string[] = []): void {
+    try {
+        runGit(dir, ["config", "--unset-all", `remote.${name}.pushurl`]);
+    } catch {
+        // Key already absent (git exits non-zero) — nothing to clear.
     }
 }
 

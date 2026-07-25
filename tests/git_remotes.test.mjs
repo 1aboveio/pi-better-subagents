@@ -392,6 +392,99 @@ describe("git_remotes.sync", () => {
 
     // @covers git_remotes.sync
     // @level unit
+    // @fails-without-fix git_remotes.sync
+    it("clears multi-stale pushurls whose paths contain regex metacharacters without treating URLs as regex", () => {
+        // Regression: `git remote set-url --push --delete <name> <url>` treats the
+        // final argument as a regex. Local paths with unmatched `[` (legal bare
+        // names) make --delete fail, and swallowing that failure left stale
+        // pushurls intact while rebuild threw. Clear must drop the config key as
+        // a complete set (e.g. `git config --unset-all remote.<name>.pushurl`)
+        // so URL text is never interpreted as a pattern.
+        const base = mkdtempSync(join(tmpdir(), "pi-remotes-pushurl-meta-"));
+        try {
+            const fetchRemote = join(base, "fetch.git");
+            // Desired destinations also contain metacharacters so rebuild is covered.
+            const desired1 = join(base, "desired[a].git");
+            const desired2 = join(base, "desired[b].git");
+            const stale1 = join(base, "stale[1].git");
+            const stale2 = join(base, "stale[2].git");
+            initBare(fetchRemote);
+            initBare(desired1);
+            initBare(desired2);
+            initBare(stale1);
+            initBare(stale2);
+
+            const source = initRepo(join(base, "source"));
+            runGit(source, ["remote", "add", "origin", fetchRemote]);
+            runGit(source, ["remote", "set-url", "--push", "origin", desired1]);
+            runGit(source, ["remote", "set-url", "--add", "--push", "origin", desired2]);
+            runGit(source, ["push", "origin", "HEAD"]);
+
+            const target = cloneWithIdentity(base, source, "clone");
+            runGit(target, ["remote", "set-url", "--push", "origin", stale1]);
+            runGit(target, ["remote", "set-url", "--add", "--push", "origin", stale2]);
+            assert.equal(
+                pushUrlsAll(target, "origin").length,
+                2,
+                "fixture must start with two stale metacharacter pushurls",
+            );
+
+            // Must not throw even when stale URLs contain unmatched `[`.
+            syncGitRemotes(source, target);
+
+            const origin = readGitRemotes(target).find((r) => r.name === "origin");
+            assert.ok(origin, "origin must remain after sync");
+            assert.equal(real(origin.url), real(fetchRemote), "fetch URL must match source");
+            assert.deepEqual(
+                origin.pushUrls.map(real),
+                [real(desired1), real(desired2)],
+                "desired ordered pushurls must be rebuilt exactly after metachar clear",
+            );
+            assert.deepEqual(
+                pushUrlsAll(target, "origin").map(real),
+                [real(desired1), real(desired2)],
+                "git must list only the desired ordered destinations after clear+rebuild",
+            );
+
+            // Behavioral proof: desired destinations receive the push; stale ones do not.
+            runGit(target, ["checkout", "-b", "meta-proof"]);
+            writeFileSync(join(target, "proof.txt"), "meta-proof\n");
+            runGit(target, ["add", "proof.txt"]);
+            runGit(target, ["commit", "-m", "meta-proof"]);
+            runGit(target, ["push", "-u", "origin", "meta-proof"]);
+
+            assert.match(
+                branchList(desired1, "meta-proof"),
+                /meta-proof/,
+                "push must land on first desired metachar pushurl",
+            );
+            assert.match(
+                branchList(desired2, "meta-proof"),
+                /meta-proof/,
+                "push must land on second desired metachar pushurl",
+            );
+            assert.equal(
+                branchList(stale1, "meta-proof"),
+                "",
+                "push must not land on first stale metachar pushurl",
+            );
+            assert.equal(
+                branchList(stale2, "meta-proof"),
+                "",
+                "push must not land on second stale metachar pushurl",
+            );
+            assert.equal(
+                branchList(fetchRemote, "meta-proof"),
+                "",
+                "push must not land on the fetch-only remote when explicit pushurls exist",
+            );
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    // @covers git_remotes.sync
+    // @level unit
     it("preserves multiple remotes independently and removes stale clone-only remotes", () => {
         const base = mkdtempSync(join(tmpdir(), "pi-remotes-multi-remote-"));
         try {

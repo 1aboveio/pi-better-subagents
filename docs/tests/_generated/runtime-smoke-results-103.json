@@ -1,21 +1,21 @@
 {
   "unit": "#103",
-  "headNote": "exact HEAD after multi-stale pushurl fix; smoke observed on same tree semantics",
+  "headNote": "exact HEAD after pushurl metacharacter clear fix; smoke observed on same tree semantics",
   "results": [
     {
       "surface": "git_remotes.read",
       "kind": "library",
       "status": "pass",
-      "command": "node --experimental-strip-types -e '<inline multi-stale→multi-desired read+sync+push smoke>'",
-      "observed": "SMOKE PASS: multi-stale→multi-desired clear+rebuild; push reached both desired, neither stale"
+      "command": "node --experimental-strip-types -e '<inline metachar multi-stale→multi-desired read+sync+push smoke>'",
+      "observed": "SMOKE PASS: metachar multi-stale clear via unset-all; push reached desired[a]/desired[b]; stale[1]/stale[2]/fetch empty; --delete would have failed"
     },
     {
       "surface": "git_remotes.sync",
       "kind": "library",
       "status": "pass",
-      "command": "node --experimental-strip-types -e '<inline multi-stale→multi-desired read+sync+push smoke>'",
-      "observed": "SMOKE PASS: multi-stale→multi-desired clear+rebuild; push reached both desired, neither stale; desired-a and desired-b both received branch smoke-multi-stale; stale-a/stale-b/fetch empty"
+      "command": "node --experimental-strip-types -e '<inline metachar multi-stale→multi-desired read+sync+push smoke>'",
+      "observed": "SMOKE PASS: metachar multi-stale clear via unset-all; push reached desired[a]/desired[b]; stale[1]/stale[2]/fetch empty; --delete would have failed"
     }
   ],
-  "headSha": "8d8c1d1c61b1c531dbcdcd9c55a33f55fc1daf9c"
+  "headSha": "PENDING_FINAL_HEAD"
 }
