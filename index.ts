@@ -15,7 +15,7 @@ import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
-import { spawnDetached, killProcessTree } from "./spawn.ts";
+import { spawnDetached, killProcessTree, type SpawnResult } from "./spawn.ts";
 import { parseRun, tailLog, formatSubagentOutputBody, formatSubagentResultBody, type Usage } from "./parse.ts";
 import { classifyChildExit, formatIncompleteResult } from "./lifecycle.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
@@ -33,9 +33,18 @@ import {
     readMeta,
     listMetas,
     effectiveStatus,
+    isFinalResultStatus,
     ownedByThisParent,
+    canExitFinalize,
     type RunMeta,
 } from "./registry.ts";
+import {
+    captureProcessIdentity,
+    needsMonitoring,
+    realProcessProbe,
+    reconcileRun,
+    type ProcessProbe,
+} from "./health.ts";
 import {
     assignBatchJobNames,
     formatBatchLaunchResponse,
@@ -191,6 +200,73 @@ function stopTicker(): void {
     if (ticker) { clearInterval(ticker); ticker = undefined; }
 }
 
+// ---- periodic health reconciliation (#63) --------------------------------
+//
+// Reconciles durable supervision status for current-parent running/orphaned
+// runs (process-group-only, ADR 0002): a run whose child is gone but whose
+// captured process group still has live members becomes durable non-terminal
+// `orphaned`; a run with no credible process-group evidence becomes durable
+// terminal `lost`. Escaped/reparented descendants are out of contract.
+// Reconciliation never kills anything; it only writes truth. The ticker
+// exists only while current-parent running/orphaned work needs monitoring.
+
+/** How often supervision is reconciled. Independent of the 1 Hz widget tick. */
+const HEALTH_TICK_MS = 15_000;
+let healthTicker: ReturnType<typeof setInterval> | undefined;
+
+/** One reconciliation pass over current-parent running/orphaned runs. */
+function reconcileHealth(): void {
+    const ctx = uiCtx;
+    for (const summary of listMetas()) {
+        if (!ownedByThisParent(summary)) continue;
+        if (summary.status !== "running" && summary.status !== "orphaned") continue;
+        // Re-read under the id: finalizeRun / subagent_stop may have written a
+        // terminal status since listMetas() snapshotted.
+        const meta = readMeta(summary.id);
+        if (!meta || (meta.status !== "running" && meta.status !== "orphaned")) continue;
+        const result = reconcileRun(meta, realProcessProbe, Date.now());
+        if (!result.changed) continue;
+        Object.assign(meta, result.patch, { status: result.status });
+        writeMeta(meta);
+        if (!result.transition) continue;
+        // Human-visible health only. The coordinator model callback for
+        // orphaned/lost is a separate unit (#65).
+        const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
+        const note = result.status === "orphaned"
+            ? `Subagent ${label} lost supervision — related processes may still be alive (orphaned).`
+            : `Subagent ${label} is lost — no related process remains and no terminal result was observed.`;
+        try { ctx?.ui.notify(note, "warning"); } catch { /* ignore */ }
+    }
+    // Stop existing the moment nothing current-parent needs monitoring.
+    if (!needsMonitoring(listMetas())) stopHealthTicker();
+}
+
+/** Start the reconciliation loop if it isn't already running. */
+function ensureHealthTicker(): void {
+    if (healthTicker) return;
+    healthTicker = setInterval(reconcileHealth, HEALTH_TICK_MS);
+    healthTicker.unref?.(); // never keep the process alive on our account
+}
+
+function stopHealthTicker(): void {
+    if (healthTicker) { clearInterval(healthTicker); healthTicker = undefined; }
+}
+
+/** Test/diagnostic seam: whether the periodic reconciliation loop is active. */
+export function isHealthTickerActive(): boolean {
+    return healthTicker !== undefined;
+}
+
+/**
+ * Spawn-time identity probe. Production uses the OS-backed probe; extension-
+ * level tests substitute a deterministic fake at this kernel boundary (never a
+ * mock of a first-party module) via setIdentityProbeForTests.
+ */
+let spawnIdentityProbe: ProcessProbe = realProcessProbe;
+export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void {
+    spawnIdentityProbe = probe ?? realProcessProbe;
+}
+
 /** Resolve the pi binary once per session. */
 let cachedPi: string | undefined;
 function resolvePiBinary(): string {
@@ -210,7 +286,11 @@ function resolvePiBinary(): string {
  */
 function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: number | null): void {
     const meta = readMeta(id);
-    if (!meta || meta.status !== "running") return;
+    // Coherent child-exit evidence supersedes provisional orphaned/lost
+    // reconciliation (a health tick can observe the just-exited pid before
+    // this close handler runs), but never overwrites a true terminal record:
+    // finalization stays idempotent and a deliberate kill stays killed.
+    if (!meta || !canExitFinalize(meta.status)) return;
     const r = parseRun(id);
     const outcome = classifyChildExit(code, r);
     meta.status = outcome.status;
@@ -340,10 +420,17 @@ export default function (pi: ExtensionAPI) {
         const sandboxDir = sandboxCommand ? requestedSandboxDir : undefined;
 
         const spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id) });
+        // Record process identity (pgid, start-time token) so health
+        // reconciliation can tell a supervised child from a recycled pid
+        // or an orphaned process group (#63). Best-effort: when the OS
+        // probes are unavailable the fields stay absent and the run is
+        // reconciled via the conservative old-metadata path.
+        const identity = captureProcessIdentity(spawned.pid, spawnIdentityProbe);
 
         const meta: RunMeta = {
             id, name: p.name, status: "running",
             pid: spawned.pid, spawnPid: process.pid, model, cwd,
+            ...identity,
             promptPreview: p.prompt.slice(0, 200),
             startedAt: Date.now(), logPath: logPathFor(id), sessionId: id,
             sandbox: sandboxDir, callback: p.callback !== false,
@@ -355,6 +442,8 @@ export default function (pi: ExtensionAPI) {
 
         uiCtx = ctx;
         ensureTicker();
+        // Start periodic supervision reconciliation (self-stops when idle).
+        ensureHealthTicker();
 
         const runtime = resolution.mode === "inherit"
             ? `Runtime: ALL installed extensions (inheritExtensions) — mid-turn drain risk\n`
@@ -667,7 +756,16 @@ export default function (pi: ExtensionAPI) {
             const meta = readMeta(p.id);
             if (!meta) throw new Error(`Unknown run id: ${p.id}`);
             const st = effectiveStatus(meta);
-            if (st === "running") {
+            if (!isFinalResultStatus(st)) {
+                if (st === "orphaned") {
+                    // Non-terminal: supervision is broken but related process-
+                    // group work may still be alive — never present this as a
+                    // final result.
+                    return text(
+                        `Run ${p.id} is orphaned — supervision was lost, but related processes may still be alive. ` +
+                        `There is no final result; use subagent_output for current (possibly still changing) output.`,
+                    );
+                }
                 return text(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`);
             }
             const exit = meta.exitCode === undefined ? "?" : String(meta.exitCode);
@@ -676,12 +774,15 @@ export default function (pi: ExtensionAPI) {
             const spend = fmtSpend(r.usage);
             const statSeg = ` · ${el}${spend ? ` · ${spend}` : ""}`;
             const tools = r.toolCalls.length ? ` · tools: ${r.toolCalls.join(", ")}` : "";
+            const diagnostic = st === "lost"
+                ? `\nRun is lost: no related process remains and no coherent terminal result was observed. Best-available artifacts below.`
+                : "";
             const rawTail = tailLog(p.id, 40);
             if (meta.failureReason === "incomplete-stream") {
                 return text(`[${p.id} · ${st} · exit ${exit}${statSeg}${tools}]\n${formatIncompleteResult(r, rawTail)}`);
             }
             return text(formatSubagentResultBody(
-                `[${p.id} · ${st} · exit ${exit}${statSeg}${tools}]`,
+                `[${p.id} · ${st} · exit ${exit}${statSeg}${tools}]${diagnostic}`,
                 r.finalText || undefined,
                 rawTail,
                 r.diagnostics,
@@ -722,11 +823,15 @@ export default function (pi: ExtensionAPI) {
         uiCtx = ctx;
         if (listMetas().some((m) => ownedByThisParent(m) && effectiveStatus(m) === "running")) ensureTicker();
         else renderWidget();
+        // Resume supervision reconciliation across /reload while current-parent
+        // running/orphaned work exists; the ticker stops itself when idle.
+        if (needsMonitoring(listMetas())) ensureHealthTicker();
     });
 
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (_event, ctx) => {
         stopTicker();
+        stopHealthTicker();
         spendCache.clear();
         try { ctx.ui.setWidget("subagents", WIDGET_CLEAR); } catch { /* ignore */ }
         lastWidgetLines = undefined;

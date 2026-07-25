@@ -12,8 +12,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { processExists } from "./spawn.ts";
 
-/** Terminal + live statuses as recorded on disk. */
-export type RunStatus = "running" | "completed" | "failed" | "killed";
+/**
+ * Terminal + live statuses as recorded on disk. `orphaned` is durable and
+ * NON-terminal (supervision broke, but related processes may still be alive);
+ * `lost` is durable and terminal (no related process evidence remains).
+ */
+export type RunStatus = "running" | "completed" | "failed" | "killed" | "orphaned" | "lost";
+
+/**
+ * True when coherent child-exit evidence may finalize a run in this status.
+ * `running` is the normal path; `orphaned`/`lost` are PROVISIONAL
+ * reconciliation verdicts (a health tick can observe the just-exited pid
+ * before the close handler runs) that the real exit — the stronger evidence —
+ * supersedes. True terminal records are never overwritten: finalization is
+ * idempotent (`completed`/`failed`) and a deliberate `subagent_stop` kill
+ * (`killed`) is not undone by the resulting exit.
+ */
+export function canExitFinalize(status: RunStatus): boolean {
+    return status === "running" || status === "orphaned" || status === "lost";
+}
 
 export interface RunMeta {
     id: string;
@@ -21,6 +38,20 @@ export interface RunMeta {
     status: RunStatus;
     /** Child process PID. */
     pid: number;
+    /** Child's process group id, captured at spawn where available (#63). */
+    pgid?: number;
+    /**
+     * Opaque process-start identity token captured at spawn where available
+     * (#63). Only equality is meaningful: a different token means the pid was
+     * recycled by an unrelated process.
+     */
+    pidStartTime?: string;
+    /** Consecutive pid-gone health ticks with no related evidence (old metadata). */
+    probeMisses?: number;
+    /** When supervision was observed broken (transition to `orphaned`). */
+    orphanedAt?: number;
+    /** When the last related process evidence disappeared (transition to `lost`). */
+    lostAt?: number;
     /** PID of the pi process that launched this run (for cross-restart ownership). */
     spawnPid: number;
     model?: string;
@@ -107,6 +138,16 @@ export function effectiveStatus(meta: RunMeta): RunStatus | "exited" {
     if (meta.status !== "running") return meta.status;
     if (processExists(meta.pid)) return "running";
     return "exited";
+}
+
+/**
+ * True when a status can yield a FINAL result: everything except `running`
+ * and the non-terminal `orphaned`. `lost` is terminal (best-available
+ * artifacts, never a completion); `exited` keeps its historic resultable
+ * treatment. Used by subagent_result's gate.
+ */
+export function isFinalResultStatus(status: RunStatus | "exited"): boolean {
+    return status !== "running" && status !== "orphaned";
 }
 
 /** True when this meta was spawned by the given parent pi PID (default: this process). */

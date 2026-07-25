@@ -20,6 +20,10 @@ cannot drift from what ships.
 | `test_env_inherit.sh` | The foreground environment (e.g. `GH_TOKEN`) reaches the subagent **through the OS sandbox**, and the child returns the exact inherited marker — credential passing. |
 | `test_headless_isolation.sh` | A child survives a parallel `bash` + `read` batch: every `tool_execution_start` has an end, a terminal agent event is reached, and `web_fetch` still works ([#17](https://github.com/1aboveio/pi-better-subagents/issues/17)). |
 | `extensions.test.mjs` | Unit: only packages backing a requested tool are loaded; nothing the model passes can widen the runtime. |
+| `health_reconcile.test.mjs` | Unit (fake process probes, process-group-only): supervised/orphaned/lost/pid-recycled/old-metadata reconciliation, no-descendant-evidence contract, durability of `orphaned`/`lost`, identity capture, monitoring predicate ([#63](https://github.com/1aboveio/pi-better-subagents/issues/63)). |
+| `extension_health_lifecycle.test.mjs` | Extension-level (real extension + fake ExtensionAPI + PATH-injected fake `pi`, real child processes): AC1 spawn→meta.json identity persistence, AC9 fake-clock health-ticker lifecycle (start / persist / self-stop), exit-supersedes-provisional-orphaned/lost interleavings (#63). |
+| `registry_identity.test.mjs` | Unit: meta.json round-trips process identity fields, old metadata reads without migration, `orphaned` non-final vs `lost` terminal for result behavior. |
+| `smoke_health_reconcile.mjs` | Runtime smoke (real OS processes, not a `.test.mjs`): supervised→orphaned→lost against the kernel — `node tests/smoke_health_reconcile.mjs`. |
 
 ## Run
 
