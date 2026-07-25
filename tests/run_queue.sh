@@ -6,6 +6,11 @@
 #   2. sandboxed child cannot write outside sandbox_dir (deterministic)
 #   3. extension tool web_fetch works in a scoped child
 #   4. bash-scoped child can drive gh headlessly via GH_TOKEN
+#   5. a child survives a parallel bash+read batch (#17 regression)
+#
+# (5) is the reason this gate exists at all: the failure it guards is a child
+# that exits 0 mid-turn and is reported as completed. Silent success is exactly
+# what a merge gate must not let back in, so it runs here, not just locally.
 #
 # test_env_inherit.sh stays local-only (run_all.sh) — env-through-sandbox is
 # covered there; queue keeps the two security asserts + network/gh smokes.
@@ -26,6 +31,7 @@ tests=(
     "$DIR/test_sandbox_deny_outside.sh"
     "$DIR/test_web_fetch.sh"
     "$DIR/test_gh_issues.sh"
+    "$DIR/test_headless_isolation.sh"
 )
 declare -a results
 fail=0
