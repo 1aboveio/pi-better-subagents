@@ -1,0 +1,16 @@
+[
+  {
+    "surface": "navigator.detail",
+    "kind": "library",
+    "status": "pass",
+    "command": "node docs/tests/issue-46-runtime-smoke.mjs",
+    "observed": "real registry+parse detail fields; Enter→detail 1s timer; running→terminal on tick; ← back keeps selection + disposes; Escape closes + disposes; narrow width ok; dispose idempotent; TUI guard intact"
+  },
+  {
+    "surface": "index.ts (extension entry)",
+    "kind": "library",
+    "status": "pass",
+    "command": "node --experimental-strip-types --check index.ts",
+    "observed": "index.ts parses; getDetail + dispose wired; session_shutdown disposes detail timers; no setFooter"
+  }
+]

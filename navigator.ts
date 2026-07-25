@@ -4,13 +4,17 @@
  */
 export {
     NAVIGATOR_STATUS_KEY,
+    DETAIL_TICK_MS,
     navigatorFooterHint,
     applyNavigatorFooter,
     isNavigatorUiAvailable,
     buildNavigatorRows,
+    buildNavigatorDetail,
+    buildDetailLines,
     createNavigatorState,
     clampSelection,
     moveSelection,
+    selectById,
     buildNavigatorLines,
     createNavigatorOverlayComponent,
     createNavigatorOverlayFactory,

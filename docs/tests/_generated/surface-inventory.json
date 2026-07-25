@@ -119,6 +119,13 @@
       "class": "read",
       "path": "navigator.mjs",
       "reachable": true
+    },
+    {
+      "id": "navigator.detail",
+      "kind": "service",
+      "class": "mutation",
+      "path": "navigator.mjs",
+      "reachable": true
     }
   ]
 }

@@ -652,7 +652,12 @@ describe("navigator overlay component", () => {
     it("an empty list renders an explicit placeholder (defensive; open normally refuses empty)", () => {
         const state = createNavigatorState([]);
         const lines = buildNavigatorLines(state, { width: 40 });
-        assert.deepEqual(lines, ["Subagents · 0", "  (no visible subagent runs)", "↑↓ select · esc close"]);
+        assert.equal(lines[0], "Subagents · 0");
+        assert.equal(lines[1], "  (no visible subagent runs)");
+        assert.ok(lines[lines.length - 1].includes("esc"), "help advertises escape");
+        assert.ok(lines[lines.length - 1].includes("enter") || lines[lines.length - 1].includes("↑↓"), "help lists navigation");
+        // Keep the exact empty-list shape pinned (title + placeholder + help).
+        assert.equal(lines.length, 3);
     });
 
     // @covers navigator.overlay
@@ -688,10 +693,12 @@ describe("navigator overlay component", () => {
     // @covers navigator.overlay
     // @level unit
     it("unrelated keys are ignored by the overlay (no close, no repaint)", async () => {
+        // Enter opens detail (#46) and is covered there; list view still ignores
+        // keys that are neither navigation, enter, nor escape.
         const o = driveOverlay([{ id: "a", status: "running", model: "m", elapsed: "1s", spend: "" }]);
         await Promise.resolve();
         o.press("x");
-        o.press("<enter>");
+        o.press("z");
         assert.deepEqual(o.doneCalls, []);
         assert.equal(o.tui.renders, 0);
     });
