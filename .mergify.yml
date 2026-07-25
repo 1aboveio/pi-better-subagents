@@ -8,7 +8,7 @@
 #
 # Docs: https://docs.mergify.com/merge-queue/two-step/
 # Validate:  mergify config validate
-# Simulate:  mergify config simulate https://github.com/exoulster/pi-better-subagents/pull/<n>
+# Simulate:  mergify config simulate https://github.com/1aboveio/pi-better-subagents/pull/<n>
 
 shared:
   # PR gate — light checks from .github/workflows/ci.yml (job name: ci).

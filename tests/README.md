@@ -7,8 +7,8 @@ stdin, positional prompt) and parses the result the way `parse.ts` does.
 
 | Test | Proves |
 |------|--------|
-| `test_web_fetch.sh` | An extension-provided tool (`web_fetch`) works in a scoped child: fetch `github.com/exoulster/pi-better-subagents`, report a word count. |
-| `test_gh_issues.sh` | A `bash`-scoped child can drive an external CLI: `gh issue list -R exoulster/pi-better-subagents`. |
+| `test_web_fetch.sh` | An extension-provided tool (`web_fetch`) works in a scoped child: fetch `github.com/1aboveio/pi-better-subagents`, report a word count. |
+| `test_gh_issues.sh` | A `bash`-scoped child can drive an external CLI: `gh issue list -R 1aboveio/pi-better-subagents`. |
 | `test_env_inherit.sh` | The foreground environment (e.g. `GH_TOKEN`) reaches the subagent **through the OS sandbox** — the hardening test for credential passing. |
 
 ## Run
@@ -34,7 +34,7 @@ Two-step gate (see `.mergify.yml`):
 | 2. Queue gate | `.github/workflows/integration-tests.yml` | `mergify/merge-queue/*` only | `integration` |
 
 `run_queue.sh` is what step 2 runs. `test_env_inherit.sh` stays local-only until
-Linux sandbox support lands ([#5](https://github.com/exoulster/pi-better-subagents/issues/5)).
+Linux sandbox support lands ([#5](https://github.com/1aboveio/pi-better-subagents/issues/5)).
 
 ## What to expect
 
