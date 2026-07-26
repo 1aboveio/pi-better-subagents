@@ -1,24 +1,28 @@
 /**
- * First-class Git remote semantics for disposable clone workspaces under
- * normal fetch-URL + pushurl topologies (issue #103).
+ * First-class Git remote semantics for disposable clone workspaces
+ * (issue #103 normal fetch-URL + pushurl topologies + issue #109 edge cases).
  *
- * Invariant (`git-remote-preservation`, issue #103): disposable clone
- * preparation must preserve every source remote name, **every** configured
- * `remote.<name>.url` value, and **every** configured `remote.<name>.pushurl`
- * value — not just the first of either. Git permits multi-valued keys for both:
+ * Invariant (`git-remote-preservation`): disposable clone preparation must
+ * preserve every source remote name, **every** configured `remote.<name>.url`
+ * value, and **every** configured `remote.<name>.pushurl` value — not just the
+ * first of either. Git permits multi-valued keys for both:
  *
  * - With no explicit pushurl, `git remote get-url --push --all` returns all
  *   fetch URLs and one `git push` reaches every URL.
  * - With explicit pushurl(s), push uses those destinations only.
+ * - Push-only remotes (issue #109): zero `remote.<name>.url` entries and one or
+ *   more `remote.<name>.pushurl` entries. Model `urls` as an empty ordered list;
+ *   never invent a fetch URL from the first pushurl.
  *
  * Collapsing either multi-valued set rewrites producer push/fetch topology.
  *
  * Values are read from null-delimited `git config` output rather than
  * `git remote -v` line parsing, which drops any URL containing spaces.
  *
- * Deferred to issue #109 (accepted descope from #103 / PR #105):
- * - push-only remotes (zero `remote.<name>.url`, one or more pushurls)
- * - source remote read-failure must abort before mutating the target
+ * Source remote read-failure safety (issue #109): if source remote config cannot
+ * be read because the source is missing/unreadable/not a Git repo,
+ * `syncGitRemotes` fails before mutating the target. A valid Git repo with no
+ * remote keys still returns `[]` and may clear target remotes.
  *
  * Consumed by disposable clone workspace preparation (issue #78 / PR #89).
  */
@@ -30,7 +34,9 @@ export interface GitRemote {
     name: string;
     /**
      * Every configured `remote.<name>.url`, in config order.
-     * Git fetches from the first and, when no pushurl is set, pushes to all.
+     * Empty for push-only remotes (zero fetch URLs, one or more pushurls).
+     * Git fetches from the first when present and, when no pushurl is set,
+     * pushes to all.
      */
     urls: string[];
     /**
@@ -55,14 +61,45 @@ function runGit(cwd: string, args: string[]): string {
 }
 
 /**
+ * Confirm `dir` is a readable Git repository (work tree or bare).
+ *
+ * `git config --get-regexp` exits 1 both when there are no matching keys in a
+ * valid repo and when the directory is not a Git repo, so callers must validate
+ * the repository first. Missing paths and permission errors also surface here.
+ */
+function assertGitRepository(dir: string): void {
+    try {
+        execFileSync("git", ["rev-parse", "--git-dir"], {
+            cwd: dir,
+            encoding: "utf-8",
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+    } catch (err) {
+        const message = (err as Error).message ?? String(err);
+        throw new Error(
+            `cannot read Git remotes from ${dir}: not a readable Git repository (${message})`,
+        );
+    }
+}
+
+/**
  * Read remote fetch/push URLs from structured Git config.
  *
  * Uses `git config --null --get-regexp` so URL values may contain spaces, tabs,
  * or other whitespace without being truncated. Collects **every**
  * `remote.<name>.url` and **every** `remote.<name>.pushurl` entry (Git allows
- * multiple of each; multi-url with no pushurl is a multi-destination push set).
+ * multiple of each; multi-url with no pushurl is a multi-destination push set;
+ * push-only remotes keep `urls: []`).
+ *
+ * A valid Git repository with no matching remote keys returns `[]`.
+ * Missing/unreadable/non-git paths throw (do not conflate with empty).
  */
 export function readGitRemotes(dir: string): GitRemote[] {
+    // Validate the repository before interpreting get-regexp exit status.
+    // git config --get-regexp exits 1 for "no match" AND for "not a git repo",
+    // so empty-valid vs operational failure is only distinguishable after this.
+    assertGitRepository(dir);
+
     let raw: string;
     try {
         // Call git directly (not runGit) so we do not .trim() away trailing
@@ -76,9 +113,16 @@ export function readGitRemotes(dir: string): GitRemote[] {
                 stdio: ["ignore", "pipe", "pipe"],
             },
         );
-    } catch {
-        // No remotes configured (git exits 1) or config unreadable.
-        return [];
+    } catch (err) {
+        const status = (err as { status?: number }).status;
+        // Exit 1 with empty output = no matching keys in a valid repo.
+        if (status === 1) {
+            return [];
+        }
+        const message = (err as Error).message ?? String(err);
+        throw new Error(
+            `cannot read Git remote config from ${dir}: ${message}`,
+        );
     }
     if (!raw) return [];
 
@@ -109,19 +153,12 @@ export function readGitRemotes(dir: string): GitRemote[] {
 
     const remotes: GitRemote[] = [];
     for (const [name, urls] of byName.entries()) {
-        // Prefer configured fetch URLs. Push-only remotes (pushurl keys only,
-        // no url key) are deferred to #109; the interim fallback below is not
-        // part of the #103 contract and must not be claimed as push-only support.
-        const fetchUrls =
-            urls.fetch.length > 0
-                ? [...urls.fetch]
-                : urls.push.length > 0
-                  ? [urls.push[0]]
-                  : [];
-        if (fetchUrls.length === 0) continue;
+        // Push-only remotes (issue #109): zero url keys, one or more pushurls.
+        // Keep urls as an empty ordered list — never invent a fetch URL.
+        if (urls.fetch.length === 0 && urls.push.length === 0) continue;
         remotes.push({
             name,
-            urls: fetchUrls,
+            urls: [...urls.fetch],
             pushUrls: [...urls.push],
         });
     }
@@ -131,15 +168,17 @@ export function readGitRemotes(dir: string): GitRemote[] {
 }
 
 /**
- * Make `targetDir`'s remotes match `sourceDir`'s #103 remote contract for
- * normal fetch-URL + pushurl topologies: names, every fetch URL, and every
- * configured push URL. Removes stale remotes that exist only on the target
- * (typical after a path-style clone).
+ * Make `targetDir`'s remotes match `sourceDir`'s remote contract: names, every
+ * fetch URL (possibly zero for push-only remotes), and every configured push
+ * URL. Removes stale remotes that exist only on the target (typical after a
+ * path-style clone).
  *
- * Source read-failure non-mutation (distinguish unreadable source from a valid
- * empty remote set) is deferred to #109.
+ * Reads and validates the source remote set **before** mutating the target.
+ * If source remote config cannot be read, throws and leaves the target unchanged.
  */
 export function syncGitRemotes(sourceDir: string, targetDir: string): void {
+    // Read source first. Any throw here (missing/unreadable/not-a-repo) aborts
+    // before target remotes are inspected or mutated (#109 non-mutation).
     const sourceRemotes = readGitRemotes(sourceDir);
     const targetRemotes = readGitRemotes(targetDir);
     const sourceNames = new Set(sourceRemotes.map((remote) => remote.name));
@@ -155,14 +194,45 @@ export function syncGitRemotes(sourceDir: string, targetDir: string): void {
     for (const remote of sourceRemotes) {
         const existing = targetRemotes.find((entry) => entry.name === remote.name);
         if (!existing) {
-            // Create the remote with the first fetch URL, then apply the full sets.
-            runGit(targetDir, ["remote", "add", remote.name, remote.urls[0]]);
-            applyFetchUrls(targetDir, remote.name, remote.urls, [remote.urls[0]]);
-        } else {
-            applyFetchUrls(targetDir, remote.name, remote.urls, existing.urls);
+            ensureRemoteExists(targetDir, remote);
         }
+        applyFetchUrls(
+            targetDir,
+            remote.name,
+            remote.urls,
+            existing?.urls ?? (remote.urls.length > 0 ? [remote.urls[0]] : []),
+        );
+        applyPushUrls(
+            targetDir,
+            remote.name,
+            remote.pushUrls,
+            existing?.pushUrls ?? [],
+        );
+    }
+}
 
-        applyPushUrls(targetDir, remote.name, remote.pushUrls, existing?.pushUrls ?? []);
+/**
+ * Ensure a remote name exists on the target so url/pushurl keys can be applied.
+ *
+ * `git remote add` requires a fetch URL, so push-only remotes are created via
+ * `git config` (fetch refspec + pushurls) rather than inventing a fetch URL.
+ */
+function ensureRemoteExists(dir: string, remote: GitRemote): void {
+    if (remote.urls.length > 0) {
+        // Normal path: create with the first fetch URL; applyFetchUrls rebuilds the full set.
+        runGit(dir, ["remote", "add", remote.name, remote.urls[0]]);
+        return;
+    }
+    // Push-only: create the remote section without a url key.
+    // A fetch refspec is enough for Git to list the remote name.
+    try {
+        runGit(dir, ["config", "--get", `remote.${remote.name}.fetch`]);
+    } catch {
+        runGit(dir, [
+            "config",
+            `remote.${remote.name}.fetch`,
+            `+refs/heads/*:refs/remotes/${remote.name}/*`,
+        ]);
     }
 }
 
@@ -172,7 +242,10 @@ export function syncGitRemotes(sourceDir: string, targetDir: string): void {
  * Same multi-value constraint as pushurls: `git remote set-url <name> <url>`
  * fatals when the key already has multiple values. Always clear the complete
  * existing url set first (`git config --unset-all`), then rebuild with
- * set-url + --add. Never use regex `--delete` of URL text.
+ * set-url + --add when desired is non-empty. When desired is empty (push-only),
+ * leave the remote with no `remote.<name>.url` keys.
+ *
+ * Never use regex `--delete` of URL text.
  */
 function applyFetchUrls(
     dir: string,
@@ -180,11 +253,7 @@ function applyFetchUrls(
     desired: string[],
     existing: string[],
 ): void {
-    if (desired.length === 0) {
-        throw new Error(`remote.${name} has no fetch URLs to apply in ${dir}`);
-    }
-
-    // Fast path: already identical in order — nothing to do.
+    // Fast path: already identical in order — nothing to do (including both empty).
     if (
         existing.length === desired.length &&
         existing.every((url, i) => url === desired[i])
@@ -193,10 +262,18 @@ function applyFetchUrls(
     }
 
     // Always clear the complete existing url set first. A bare `set-url`
-    // cannot replace a multi-valued set (Git fatals).
+    // cannot replace a multi-valued set (Git fatals). For push-only desired
+    // sets this is the whole operation (no rebuild).
     clearAllFetchUrls(dir, name);
 
+    if (desired.length === 0) {
+        // Push-only: remote remains with fetch refspec + pushurls only.
+        return;
+    }
+
     // Rebuild desired ordered set: first set-url, then --add.
+    // If the remote has no url key (e.g. was push-only), set-url still works
+    // when the remote section exists; otherwise ensureRemoteExists already added it.
     runGit(dir, ["remote", "set-url", name, desired[0]]);
     for (let i = 1; i < desired.length; i++) {
         runGit(dir, ["remote", "set-url", "--add", name, desired[i]]);
@@ -213,6 +290,11 @@ function applyFetchUrls(
  * set first, then rebuild the desired ordered set with set-url + --add.
  * When the desired set is empty, every existing pushurl is deleted so push
  * falls back to every configured fetch URL.
+ *
+ * For push-only remotes (no fetch URL), rebuild via `git config --add
+ * remote.<name>.pushurl` because `git remote set-url --push` may require an
+ * existing remote url section depending on Git version; config keys are the
+ * durable representation either way.
  */
 function applyPushUrls(
     dir: string,
@@ -234,9 +316,9 @@ function applyPushUrls(
 
     if (desired.length === 0) {
         // Desired is empty: after unset-all, Git's default (push → all fetch
-        // URLs) holds. `get-url --push --all` reports fetch URL(s) when no
-        // pushurl key exists, so treat remaining entries equal to fetch set
-        // as already-default.
+        // URLs) holds when fetch URLs exist. `get-url --push --all` reports
+        // fetch URL(s) when no pushurl key exists, so treat remaining entries
+        // equal to fetch set as already-default.
         const remaining = safePushUrlsAll(dir, name);
         const fetchUrls = safeFetchUrlsAll(dir, name);
         const isDefaultOnly =
@@ -260,11 +342,11 @@ function applyPushUrls(
         return;
     }
 
-    // Rebuild desired ordered set: first set-url --push, then --add --push.
-    // Safe now because the multi-valued set was cleared above.
-    runGit(dir, ["remote", "set-url", "--push", name, desired[0]]);
-    for (let i = 1; i < desired.length; i++) {
-        runGit(dir, ["remote", "set-url", "--add", "--push", name, desired[i]]);
+    // Prefer git-config direct writes so push-only remotes (no url key) work
+    // the same as normal remotes. set-url --push can behave oddly when there
+    // is no fetch URL (it may treat the remote name as a URL).
+    for (const url of desired) {
+        runGit(dir, ["config", "--add", `remote.${name}.pushurl`, url]);
     }
 }
 
@@ -278,7 +360,8 @@ function applyPushUrls(
  * wholesale without interpreting URL text as a pattern.
  *
  * Note: after unset-all the remote still exists (fetch refspec remains) but
- * has no url until rebuild. Callers must rebuild immediately.
+ * has no url until rebuild. Callers must rebuild immediately when desired
+ * is non-empty; empty desired is the push-only topology.
  */
 function clearAllFetchUrls(dir: string, name: string): void {
     try {
