@@ -7,4 +7,11 @@ export {
     buildSubagentList,
 } from "./list.mjs";
 
-export type EffectiveSubagentStatus = "running" | "completed" | "failed" | "killed" | "exited";
+export type EffectiveSubagentStatus =
+    | "running"
+    | "completed"
+    | "failed"
+    | "killed"
+    | "exited"
+    | "orphaned"
+    | "lost";

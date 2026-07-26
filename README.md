@@ -38,9 +38,9 @@ launch is the result · completion triggers fetch · the foreground never blocks
 |------|---------|--------------|
 | `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`. |
 | `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; same optional params as `subagent_spawn`), `onCapacity` (`reject` or `launch-available`). |
-| `subagent_list` | never | List running/finished runs with status, model, elapsed, spend, and batch info. Params: `all`, `limit` (default 20, max 100; larger values are clamped), `status` (`running`, `completed`, `failed`, `killed`, `exited`). |
-| `subagent_output` | never | Tail a run's live output as it stands right now. |
-| `subagent_result` | never | Read a finished run's final output (says "still running" otherwise). |
+| `subagent_list` | never | List running/finished runs with status, model, elapsed, spend, and batch info. Params: `all`, `limit` (default 20, max 100; larger values are clamped), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Degraded health facts (stale, long tool, compacting, model error, …) appear only when actionable. |
+| `subagent_output` | never | Tail a run's live output as it stands right now. Includes a `[health: …]` diagnostic for orphaned, lost, and degraded running runs; healthy/quiet stays quiet. |
+| `subagent_result` | never | Read a finished run's final output (says "still running" otherwise). For `orphaned` returns a non-final diagnostic plus best-current artifacts; for `lost` a terminal-unknown diagnostic plus best-available artifacts. |
 | `subagent_stop` | never | SIGTERM a running run's process group. |
 
 ## Non-blocking, by construction
@@ -316,7 +316,46 @@ and clears navigator footer statuses (TUI only).
 
 ## Parent-process scoping
 
-The live widget, default `subagent_list`, concurrency cap, and `session_start` ticker only include runs this pi process spawned (`spawnPid === process.pid`). The on-disk registry stays machine-global for durability. `subagent_list` shows newest runs first and is capped at 20 rows by default; pass `limit:N` to request fewer or more rows, up to the documented maximum of 100 (larger values are clamped with a clear note). Pass `all:true` for a global view; it still respects the default or explicit limit. Pass `status:[...]` to filter by effective status: `running`, `completed`, `failed`, `killed`, or transient `exited`. Id-based `subagent_result` / `subagent_output` / `subagent_stop` still resolve any run id (cross-session recovery).
+The live widget, default `subagent_list`, concurrency cap, and `session_start` ticker only include runs this pi process spawned (`spawnPid === process.pid`). The on-disk registry stays machine-global for durability. `subagent_list` shows newest runs first and is capped at 20 rows by default; pass `limit:N` to request fewer or more rows, up to the documented maximum of 100 (larger values are clamped with a clear note). Pass `all:true` for a global view; it still respects the default or explicit limit. Pass `status:[...]` to filter by effective status: `running`, `completed`, `failed`, `killed`, transient `exited`, or durable `orphaned` / `lost`. Id-based `subagent_result` / `subagent_output` / `subagent_stop` still resolve any run id (cross-session recovery).
+
+## Supervision health (`orphaned` / `lost`)
+
+While a current-parent run is `running` or `orphaned`, a periodic health tick
+reconciles process-group evidence only (see `docs/adr/0002-process-group-only-subagent-health.md`):
+
+- **`orphaned`** — direct supervision of the child is broken, but related
+  process-group work may still be alive. Non-terminal and non-final; operationally
+  unhealthy immediately. The coordinator (when `callback:true`) gets one durable
+  ATTENTION follow-up naming `subagent_result` / `subagent_output` / `subagent_stop`
+  so it can inspect artifacts and decide whether to wait, stop, or retry. Human
+  `ui.notify` still fires when `callback:false`.
+- **`lost`** — no related process remains and no coherent terminal completion was
+  observed. Terminal with unknown outcome (not the same as `failed`). Same one-shot
+  ATTENTION follow-up + diagnostic `subagent_result` path with best-available
+  artifacts.
+
+Callbacks use the same non-interrupting `{ deliverAs: "followUp", triggerTurn: true }`
+mechanics as completion, with distinct ATTENTION wording. Per-status markers on
+`meta.json` (`orphanedCallbackSentAt` / `lostCallbackSentAt`) are written only after
+a successful handoff and dedupe across reloads and repeated health ticks. Persisted
+unmarked orphaned/lost states are recovered on the health ticker after `/reload`
+even when process evidence does not produce a fresh transition.
+
+### Surfacing health (tools + passive widget)
+
+Multi-dimensional observations (`stale`, long tool, compacting / long compaction,
+model error/retry, plus process `orphaned` / `lost`) are computed from durable
+status + child-event evidence and surfaced on existing paths without a parallel
+health model:
+
+- **`subagent_list`** — durable `orphaned` / `lost` status brackets; degraded
+  compact facts only when actionable. Healthy/quiet rows stay on the compact format.
+- **`subagent_output` / `subagent_result`** — `[health: …]` diagnostics for
+  orphaned, lost, and degraded running runs; #65 orphaned/lost result bodies kept.
+- **Passive live widget** — healthy/quiet unchanged; degraded (and orphaned) may
+  show a short suffix. Still `setWidget` only — never focusable.
+- **`callback:false`** suppresses coordinator follow-up only; human `ui.notify` and
+  TUI/passive visibility remain.
 
 ## Install
 
