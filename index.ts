@@ -23,6 +23,7 @@ import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { maybeBuildSandboxCommand } from "./sandbox.ts";
+import { resolveSubagentWorkspace } from "./git-workspace.ts";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -443,7 +444,7 @@ export default function (pi: ExtensionAPI) {
         prompt: string; name?: string; model?: string; tools?: string;
         exclude_tools?: string; clean?: boolean; sandbox?: boolean;
         sandbox_dir?: string; callback?: boolean; cwd?: string;
-        approve?: boolean; allow_nested?: boolean;
+        git_clone_workspace?: boolean; approve?: boolean; allow_nested?: boolean;
     };
 
     /**
@@ -466,15 +467,29 @@ export default function (pi: ExtensionAPI) {
     }> {
         const cfg = loadConfig();
 
-        const explicitSandbox = p.sandbox === true || typeof p.sandbox_dir === "string";
+        // Sandbox is ON by default. sandbox_dir moves the confinement + working
+        // dir elsewhere. git_clone_workspace prepares a disposable clone with
+        // .git/ inside the writable root for Git-mutating sandboxed subagents.
+        const explicitSandbox = p.sandbox === true || typeof p.sandbox_dir === "string" || p.git_clone_workspace === true;
         const sandboxEnabled = p.sandbox !== false; // default on
-        const cwd = p.sandbox_dir ?? p.cwd ?? ctx.cwd;
-        const requestedSandboxDir = sandboxEnabled ? (p.sandbox_dir ?? cwd) : undefined;
-        const model = p.model ?? cfg.defaultModel ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
 
         mkdirSync(sessionsDir(), { recursive: true });
         const id = nextRunId();
         mkdirSync(runDir(id), { recursive: true });
+
+        const workspace = resolveSubagentWorkspace({
+            ctxCwd: ctx.cwd,
+            cwd: p.cwd,
+            sandboxDir: p.sandbox_dir,
+            gitCloneWorkspace: p.git_clone_workspace,
+            runId: id,
+            runDirPath: runDir(id),
+            sandboxEnabled,
+        });
+        const cwd = workspace.cwd;
+        const requestedSandboxDir = workspace.requestedSandboxDir;
+        const model = p.model ?? cfg.defaultModel ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
+
         if (requestedSandboxDir) mkdirSync(requestedSandboxDir, { recursive: true });
         writeFileSync(promptPathFor(id), p.prompt);
 
@@ -584,6 +599,7 @@ export default function (pi: ExtensionAPI) {
             "Only call subagent_result / subagent_output when the user explicitly asks how a run is going or for its result.",
             "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. Pick a model with the model param (e.g. 'xai/grok-4.5').",
             "By default the subagent is sandboxed (writes confined to its working dir, reads and network open) and triggers completion here on finish. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
+            "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
         ],
         parameters: Type.Object({
             prompt: Type.String({ description: "The task for the subagent. This is the only context it gets — be self-contained." }),
@@ -596,6 +612,7 @@ export default function (pi: ExtensionAPI) {
             sandbox_dir: Type.Optional(Type.String({ description: "Confine writes to (and run the child in) this directory instead of the working dir. Created if missing." })),
             callback: Type.Optional(Type.Boolean({ description: "Default TRUE: on completion, trigger a turn that calls subagent_result and presents the result. Set false to finish quietly — the result is then read on demand via subagent_result." })),
             cwd: Type.Optional(Type.String({ description: "Working directory (default: current)." })),
+            git_clone_workspace: Type.Optional(Type.Boolean({ description: "Prepare a disposable Git clone workspace for sandboxed Git-mutating subagents. The clone has a real .git/ directory inside the sandbox writable root and is self-contained after setup." })),
             approve: Type.Optional(Type.Boolean({ description: "Trust project-local files in the child (default: false; headless runs cannot prompt for trust)." })),
             allow_nested: Type.Optional(Type.Boolean({ description: "Allow the child to spawn its own subagents (default: false). Loads this extension in the child and allowlists its tools." })),
         }),
@@ -660,6 +677,7 @@ export default function (pi: ExtensionAPI) {
                 callback: Type.Optional(Type.Boolean({ description: "Default TRUE: post result back on completion." })),
                 clean: Type.Optional(Type.Boolean({ description: "Hermetic builtins-only child; no extensions load." })),
                 cwd: Type.Optional(Type.String({ description: "Working directory (default: current)." })),
+                git_clone_workspace: Type.Optional(Type.Boolean({ description: "Prepare a disposable Git clone workspace for each job (same semantics as subagent_spawn)." })),
                 approve: Type.Optional(Type.Boolean({ description: "Trust project-local files in children." })),
                 allow_nested: Type.Optional(Type.Boolean({ description: "Allow children to spawn their own subagents." })),
             }, { description: "Options applied to every job; per-job values override these." })),
@@ -674,6 +692,7 @@ export default function (pi: ExtensionAPI) {
                 callback: Type.Optional(Type.Boolean()),
                 clean: Type.Optional(Type.Boolean()),
                 cwd: Type.Optional(Type.String()),
+                git_clone_workspace: Type.Optional(Type.Boolean()),
                 approve: Type.Optional(Type.Boolean()),
                 allow_nested: Type.Optional(Type.Boolean()),
             }, { description: "A single batch job." }), {

@@ -36,7 +36,7 @@ launch is the result · completion triggers fetch · the foreground never blocks
 
 | Tool | Blocks? | What it does |
 |------|---------|--------------|
-| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `approve`, `allow_nested`. |
+| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`. |
 | `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; same optional params as `subagent_spawn`), `onCapacity` (`reject` or `launch-available`). |
 | `subagent_list` | never | List running/finished runs with status, model, elapsed, spend, and batch info. Params: `all`, `limit` (default 20, max 100; larger values are clamped), `status` (`running`, `completed`, `failed`, `killed`, `exited`). |
 | `subagent_output` | never | Tail a run's live output as it stands right now. |
@@ -81,6 +81,48 @@ it does not depend on any other extension being installed.
 - **No runaway recursion.** A subagent cannot spawn its own subagents unless
   `allow_nested:true` — and not by denying the tools after the fact: without that
   flag this package isn't loaded in the child, so the tools don't exist.
+
+### Git-mutating subagents and linked worktrees
+
+A sandboxed subagent that will mutate Git should set **`git_clone_workspace:true`**
+on `subagent_spawn`. The parent prepares a fresh, self-contained Git clone whose
+`.git/` directory lives **inside the sandbox writable root**, then runs the child
+in that clone.
+
+Why this matters: a linked Git worktree (created with `git worktree add`) has a
+`.git` file that points back to administrative state under the main repository,
+typically outside the sandbox directory. A sandbox that only allows writes under
+the worktree directory therefore cannot support normal Git producer operations
+such as fetch, rebase, commit, and push — the child stalls or fails when Git
+tries to write metadata it cannot reach. `git_clone_workspace:true` avoids this
+by cloning the repository with a real `.git/` directory inside the writable root.
+
+The clone uses:
+
+```
+git clone --reference-if-able <local-reference-repo> --dissociate \
+          <remote-url> <sandbox-workspace>
+```
+
+`--reference-if-able` borrows local objects from the parent repository during
+setup; `--dissociate` removes the alternates link afterwards, so the clone is
+self-contained and safe to delete. The clone source prefers the source
+workspace's upstream remote URL (`origin` when set) so the disposable
+workspace's `origin` points at the real remote rather than the parent working
+tree — pushes therefore target upstream, not the sandboxed parent. The local
+repository is used only as a reference (and as a content fallback when no
+remote is configured). Source remotes are re-synced after clone. The
+checked-out branch/commit matches the source workspace at spawn time.
+Repo-local Git identity settings from the source (`user.name`, `user.email`,
+and `user.signingkey` when set) are copied into the clone so ordinary commits
+work without reconfiguring identity inside the disposable workspace.
+
+If the source workspace is a linked worktree, the clone is prepared from the
+main repository's object database and the requested branch/commit; the child is
+never launched into the structurally broken linked-worktree sandbox. If clone
+preparation fails, the spawn fails fast with a message explaining that the
+linked-worktree Git metadata is outside the sandbox and recommending
+`git_clone_workspace:true`.
 
 Note that because children load only the extensions backing their tools, a
 guardrails extension (e.g. `@aliou/pi-guardrails`) does **not** apply inside a

@@ -28,6 +28,9 @@ export function mergeJobOptions(shared, job) {
         sandbox_dir: job.sandbox_dir ?? shared?.sandbox_dir,
         callback: job.callback ?? shared?.callback,
         cwd: job.cwd ?? shared?.cwd,
+        // Same semantics as subagent_spawn: shared and per-job values must reach
+        // spawnSubagentRun so batch jobs can request disposable clone workspaces.
+        git_clone_workspace: job.git_clone_workspace ?? shared?.git_clone_workspace,
         approve: job.approve ?? shared?.approve,
         allow_nested: job.allow_nested ?? shared?.allow_nested,
     };
