@@ -15,9 +15,10 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readMeta, listMetas, effectiveStatus, isFinalResultStatus } from "./registry.ts";
+import { readMeta, listMetas, effectiveStatus, isFinalResultStatus, type RunMeta, type RunStatus } from "./registry.ts";
 import { parseRun, tailLog, formatSubagentOutputBody } from "./parse.ts";
 import { buildSubagentResultText } from "./finalization.ts";
+import { formatOrphanedResult } from "./lifecycle.ts";
 import { stopRun } from "./stop.ts";
 import { fmtElapsed, fmtSpend } from "./widget.ts";
 import {
@@ -26,6 +27,33 @@ import {
     SUBAGENT_LIST_STATUSES,
     buildSubagentList,
 } from "./list.ts";
+import {
+    extractChildEventFactsFromLog,
+    loadHealthThresholdsFromConfig,
+    observeRunHealth,
+    type HealthObservation,
+} from "./health-observation.ts";
+import {
+    appendHealthDiagnostic,
+    formatHealthDiagnosticLine,
+} from "./health-surface.mjs";
+
+/** Observe one run for list/output/result diagnostics (#66/#67). Best-effort. */
+function observeMetaHealth(meta: RunMeta, now: number = Date.now()): HealthObservation {
+    // Observation uses durable RunStatus (orphaned/lost/running/…); transient
+    // effective "exited" falls back to meta.status so process liveness stays truthful.
+    const eff = effectiveStatus(meta);
+    const status: RunStatus = eff === "exited" ? meta.status : eff;
+    const { facts, rawLog } = extractChildEventFactsFromLog(meta.id, { now });
+    return observeRunHealth({
+        status,
+        now,
+        facts,
+        rawLog,
+        thresholds: loadHealthThresholdsFromConfig(),
+        startedAt: meta.startedAt,
+    });
+}
 
 /** The slice of `@earendil-works/pi-ai`'s Type the tool schemas use. */
 type TypeModule = {
@@ -60,13 +88,27 @@ export function subagentListTool(Type: TypeModule): ToolDefinition {
         }),
         async execute(_toolCallId: string, params: unknown) {
             const p = (params ?? {}) as { all?: boolean; limit?: number; status?: string[] | string };
+            const now = Date.now();
+            const metas = listMetas();
+            // Cache observations per id so usage + health share one parse where needed.
+            const healthCache = new Map<string, HealthObservation>();
+            const healthById = (id: string) => {
+                const hit = healthCache.get(id);
+                if (hit) return hit;
+                const meta = metas.find((m) => m.id === id) ?? readMeta(id);
+                if (!meta) return undefined;
+                const obs = observeMetaHealth(meta, now);
+                healthCache.set(id, obs);
+                return obs;
+            };
             return text(buildSubagentList({
-                metas: listMetas(),
+                metas,
                 params: p,
                 parentPid: process.pid,
-                now: Date.now(),
+                now,
                 statusOf: effectiveStatus,
                 usageById: (id: string) => parseRun(id).usage,
+                healthById,
             }));
         },
     } as ToolDefinition;
@@ -99,7 +141,17 @@ export function subagentOutputTool(Type: TypeModule): ToolDefinition {
             const head = `[${p.id} · ${st} · ${el}${spend ? ` · ${spend}` : ""}]`;
             const tools = r.toolCalls.length ? `\ntools used: ${r.toolCalls.join(", ")}` : "";
             const raw = tailLog(p.id, p.tail_lines ?? 40);
-            return text(formatSubagentOutputBody(head, tools, r.finalText || r.lastActivity || undefined, raw, r.diagnostics));
+            const body = formatSubagentOutputBody(
+                head,
+                tools,
+                r.finalText || r.lastActivity || undefined,
+                raw,
+                r.diagnostics,
+            );
+            // Health diagnostics for orphaned/lost/degraded only (#67). Healthy/quiet
+            // stays on today's body. Independent of meta.callback.
+            const healthLine = formatHealthDiagnosticLine(observeMetaHealth(meta));
+            return text(appendHealthDiagnostic(body, healthLine));
         },
     } as ToolDefinition;
 }
@@ -128,21 +180,31 @@ export function subagentResultTool(Type: TypeModule): ToolDefinition {
                 if (st === "orphaned") {
                     // Non-terminal: supervision is broken but related process-
                     // group work may still be alive — never present this as a
-                    // final result.
-                    return text(
-                        `Run ${p.id} is orphaned — supervision was lost, but related processes may still be alive. ` +
-                        `There is no final result; use subagent_output for current (possibly still changing) output.`,
-                    );
+                    // final result. Surface best-CURRENT artifacts (#65) plus
+                    // health diagnostic (#67).
+                    const r = parseRun(p.id);
+                    const el = fmtElapsed((meta.endedAt ?? Date.now()) - meta.startedAt);
+                    const spend = fmtSpend(r.usage);
+                    const tools = r.toolCalls.length ? ` · tools: ${r.toolCalls.join(", ")}` : "";
+                    const head = `[${p.id} · orphaned · ${el}${spend ? ` · ${spend}` : ""}${tools}]`;
+                    const rawTail = tailLog(p.id, 40);
+                    const body = `${head}\n${formatOrphanedResult(r, rawTail)}`;
+                    const healthLine = formatHealthDiagnosticLine(observeMetaHealth(meta));
+                    return text(appendHealthDiagnostic(body, healthLine));
                 }
                 return text(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`);
             }
             // Lifecycle-aware body (complete-stream authority + diagnostics).
+            // Lost runs go through formatLostResult inside formatSubagentResult (#65).
             const body = buildSubagentResultText(p.id);
             if (body === null) {
                 // Defensive: status race between effectiveStatus and body assembly.
                 return text(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`);
             }
-            return text(body);
+            // Append degraded/lost health facts when present; completed/failed
+            // happy paths stay quiet when observation is non-actionable.
+            const healthLine = formatHealthDiagnosticLine(observeMetaHealth(meta));
+            return text(appendHealthDiagnostic(body, healthLine));
         },
     } as ToolDefinition;
 }

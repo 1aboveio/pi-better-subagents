@@ -53,6 +53,16 @@ export interface RunMeta {
     orphanedAt?: number;
     /** When the last related process evidence disappeared (transition to `lost`). */
     lostAt?: number;
+    /**
+     * Durable per-status health-callback handoff markers (#65).
+     * Written only after a successful coordinator handoff (sendMessage returned,
+     * or callback:false suppressed the model path intentionally). Once set,
+     * repeated health ticks and /reload must not re-fire that status. A missing
+     * marker on orphaned/lost means recovery must still attempt delivery.
+     * Independent of completion callbacks.
+     */
+    orphanedCallbackSentAt?: number;
+    lostCallbackSentAt?: number;
     /** PID of the pi process that launched this run (for cross-restart ownership). */
     spawnPid: number;
     model?: string;

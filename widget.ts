@@ -23,4 +23,6 @@ export {
     nextWidgetAction,
     buildWidgetLines,
     isSpendCacheFresh,
+    isHealthLogCacheFresh,
+    resolveHealthLogExtraction,
 } from "./widget.mjs";

@@ -10,6 +10,8 @@
  * stable so neighboring ▶ job-* rows do not jump.
  */
 
+import { formatWidgetHealthSuffix } from "./health-surface.mjs";
+
 export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /** Default ticker cadence (ms). */
@@ -130,11 +132,15 @@ export function nextWidgetAction(prevLines, nextLines) {
 /**
  * Build the widget lines for currently-running subagents.
  *
+ * Healthy/quiet health is silent (issue #67). Degraded observations may append
+ * a short suffix via `healthById` without making the widget interactive.
+ *
  * @param {object} p
  * @param {Array<{ id: string, name?: string|null, model?: string|null, startedAt: number }>} p.running
  * @param {number} p.frame - spinner frame index
  * @param {number} p.now - Date.now()
  * @param {Record<string, { usage?: object, tool?: string|null }>} [p.spendById]
+ * @param {Record<string, object>|undefined} [p.healthById] - optional #66 observations
  * @returns {string[]}
  */
 export function buildWidgetLines(p) {
@@ -142,6 +148,7 @@ export function buildWidgetLines(p) {
     const frame = p.frame ?? 0;
     const now = p.now ?? Date.now();
     const spendById = p.spendById ?? {};
+    const healthById = p.healthById ?? {};
     const spin = SPINNER[((frame % SPINNER.length) + SPINNER.length) % SPINNER.length];
     const lines = [`Subagents · ${running.length} running`];
     for (const m of running) {
@@ -149,10 +156,11 @@ export function buildWidgetLines(p) {
         const snap = spendById[m.id] ?? {};
         const spend = fmtSpendFixed(snap.usage);
         const tool = snap.tool ? ` · ${snap.tool}` : "";
+        const health = formatWidgetHealthSuffix(healthById[m.id]);
         const nm = m.name ?? m.id;
         // Preserve list-show-model (#14): "name · shortModel" before fixed elapsed.
         // Two spaces before elapsed keep a stable gap; elapsed itself is fixed-width.
-        lines.push(`  ${spin} ${nm} · ${shortModel(m.model)}  ${el}${tool}${spend ? `  ${spend}` : ""}`);
+        lines.push(`  ${spin} ${nm} · ${shortModel(m.model)}  ${el}${tool}${spend ? `  ${spend}` : ""}${health}`);
     }
     return lines;
 }
@@ -169,4 +177,37 @@ export function isSpendCacheFresh(cached, now, logSize, ttlMs = SPEND_REFRESH_MS
     if (!cached) return false;
     if (typeof logSize === "number" && cached.logSize !== logSize) return false;
     return now - cached.refreshedAt < ttlMs;
+}
+
+/**
+ * Whether a cached health-log parse is still valid for the widget tick.
+ * Invalidates on log size or mtime change so growth/rewrite re-extracts, while
+ * unchanged logs skip the synchronous full-log reparse on every 1 Hz frame.
+ *
+ * @param {{ logSize?: number, mtimeMs?: number }|null|undefined} cached
+ * @param {number} logSize
+ * @param {number} [mtimeMs]
+ */
+export function isHealthLogCacheFresh(cached, logSize, mtimeMs) {
+    if (!cached) return false;
+    if (cached.logSize !== logSize) return false;
+    if (typeof mtimeMs === "number" && cached.mtimeMs !== mtimeMs) return false;
+    return true;
+}
+
+/**
+ * Resolve child-event facts via size/mtime cache. Calls `extract` only on miss
+ * so the widget hot path can bound full-log reparses across frames.
+ *
+ * @param {{ facts: unknown, rawLog: unknown, logSize?: number, mtimeMs?: number }|null|undefined} cached
+ * @param {{ logSize: number, mtimeMs?: number }} identity
+ * @param {() => { facts: unknown, rawLog: unknown }} extract
+ * @returns {{ facts: unknown, rawLog: unknown, hit: boolean }}
+ */
+export function resolveHealthLogExtraction(cached, identity, extract) {
+    if (isHealthLogCacheFresh(cached, identity.logSize, identity.mtimeMs)) {
+        return { facts: cached.facts, rawLog: cached.rawLog, hit: true };
+    }
+    const { facts, rawLog } = extract();
+    return { facts, rawLog, hit: false };
 }

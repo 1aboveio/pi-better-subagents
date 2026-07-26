@@ -18,9 +18,14 @@
  *   orphaned/lost reconciliation (a health tick can observe the just-exited
  *   pid before the close handler runs; the close is the stronger evidence).
  * - AC7/AC8 outcome evidence: the registered `subagent_result` tool returns a
- *   non-final/no-final-result response for orphaned metadata and a terminal
- *   lost diagnostic plus best-available artifacts for lost metadata; default
- *   `subagent_list` surfaces orphaned as a non-terminal listed status.
+ *   non-final diagnostic plus best-current artifacts for orphaned metadata and
+ *   a terminal lost diagnostic plus best-available artifacts for lost metadata;
+ *   default `subagent_list` surfaces orphaned as a non-terminal listed status.
+ * - #65 health callbacks: orphaned/lost transitions deliver one durable,
+ *   non-interrupting coordinator follow-up when callback:true; callback:false
+ *   suppresses model follow-up only; markers mean successful handoff and
+ *   survive reloads/repeated ticks; persisted unmarked orphaned/lost recover
+ *   after reload even without a fresh transition.
  *
  * The host-provided `@earendil-works/pi-ai` package (not installed in this
  * repo) is stubbed via module resolve hooks — an external boundary; no
@@ -31,6 +36,10 @@
  * // @covers health.reconcile
  * // @level unit
  * // @covers registry.process-identity
+ * // @level unit
+ * // @covers subagent.health-callback
+ * // @level unit
+ * // @covers subagent.result
  * // @level unit
  */
 import { describe, it, after, mock } from "node:test";
@@ -366,20 +375,23 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
         return meta;
     }
 
-    it("subagent_result returns non-final/no-final-result for orphaned metadata", async () => {
+    it("subagent_result returns non-final diagnostic plus best-current artifacts for orphaned metadata", async () => {
         const h = makeHarness();
         try {
+            const artifact = "still-running-group-output";
             const meta = writeFixtureMeta({
                 status: "orphaned",
-                artifactLine: "still-running-group-output",
+                artifactLine: artifact,
             });
             const res = await h.tools.get("subagent_result").execute("tc", { id: meta.id });
             const out = toolText(res);
-            assert.match(out, /is orphaned/i, `must name orphaned status:\n${out}`);
+            assert.match(out, /orphaned/i, `must name orphaned status:\n${out}`);
             assert.match(out, /no final result/i, `must refuse a final result:\n${out}`);
+            assert.match(out, /best-current parsed output/i, `must label best-current artifacts:\n${out}`);
+            assert.match(out, new RegExp(artifact), `must surface best-current log artifacts:\n${out}`);
             assert.doesNotMatch(out, /\bexit\b/i, `must not present an exit-coded final block:\n${out}`);
             assert.doesNotMatch(out, /Best-available artifacts/i, `orphaned is not the lost terminal path:\n${out}`);
-            assert.doesNotMatch(out, /still-running-group-output/, `must not dump artifacts as a final answer:\n${out}`);
+            assert.doesNotMatch(out, /✓ completed/i, `must not pretend normal completion:\n${out}`);
         } finally {
             h.shutdown();
         }
@@ -394,8 +406,20 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
             const out = toolText(res);
             assert.match(out, new RegExp(`\\[${meta.id} · lost ·`), `must open a terminal result head with lost:\n${out}`);
             assert.match(out, /Run is lost: no related process remains/i, `must include the lost diagnostic:\n${out}`);
-            assert.match(out, /Best-available artifacts below/i, `must point at best-available artifacts:\n${out}`);
+            assert.match(out, /[Bb]est-available/i, `must point at best-available artifacts:\n${out}`);
             assert.match(out, new RegExp(artifact), `must surface available log artifacts:\n${out}`);
+        } finally {
+            h.shutdown();
+        }
+    });
+
+    it("subagent_result does not throw solely because a run is orphaned or lost", async () => {
+        const h = makeHarness();
+        try {
+            const orphaned = writeFixtureMeta({ status: "orphaned", artifactLine: "o" });
+            const lost = writeFixtureMeta({ status: "lost", artifactLine: "l" });
+            await assert.doesNotReject(() => h.tools.get("subagent_result").execute("tc", { id: orphaned.id }));
+            await assert.doesNotReject(() => h.tools.get("subagent_result").execute("tc", { id: lost.id }));
         } finally {
             h.shutdown();
         }
@@ -430,5 +454,378 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
         } finally {
             h.shutdown();
         }
+    });
+});
+
+/**
+ * Issue #65 — orphaned/lost coordinator follow-ups through the real health tick.
+ * Proves delivery, wording hooks, callback:false suppression, durable recovery
+ * after reload for unmarked orphaned/lost, post-handoff markers, and durable
+ * dedupe via registered extension wiring (not helper truth tables alone).
+ *
+ * // @covers subagent.health-callback
+ * // @level unit
+ */
+describe("#65 — orphaned/lost health callbacks via health ticker", () => {
+    /** Health follow-ups for one run id (other on-disk fixtures may also tick). */
+    function healthMsgsFor(sent, id) {
+        return sent.filter(
+            (s) => s.message?.customType === "subagent-health"
+                && typeof s.message?.content === "string"
+                && s.message.content.includes(id),
+        );
+    }
+
+    it("orphaned transition sends one explicit followUp when callback:true", async () => {
+        writeFakePi(TRAP_FAIL_SCRIPT);
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            setIdentityProbeForTests(fakeSpawnIdentityProbe());
+            try {
+                const { id, pid } = await spawnRun(h);
+                // Recorded pid gone + live group (the real child) → orphaned.
+                const meta = readMeta(id);
+                writeMeta({ ...meta, pid: DEAD_PID, callback: true });
+                mock.timers.tick(HEALTH_TICK_MS);
+
+                assert.equal(readMeta(id).status, "orphaned");
+                const msgs = healthMsgsFor(h.sent, id);
+                assert.equal(msgs.length, 1, `exactly one health callback for ${id}; got ${msgs.length}`);
+                assert.equal(msgs[0].options.deliverAs, "followUp");
+                assert.equal(msgs[0].options.triggerTurn, true);
+                assert.match(msgs[0].message.content, /ATTENTION/i);
+                assert.match(msgs[0].message.content, /supervision/i);
+                assert.match(msgs[0].message.content, /may still be alive/i);
+                assert.match(msgs[0].message.content, /subagent_result/);
+                assert.match(msgs[0].message.content, /subagent_output/);
+                assert.match(msgs[0].message.content, /wait/i);
+                assert.match(msgs[0].message.content, /stop/i);
+                assert.match(msgs[0].message.content, /retry/i);
+                assert.ok(readMeta(id).orphanedCallbackSentAt > 0, "durable orphaned callback marker");
+                assert.ok(
+                    h.notes.some((n) => n.level === "warning" && n.msg.includes(id)),
+                    "human notify still fires for this run",
+                );
+
+                // Repeated ticks must not re-fire this run.
+                mock.timers.tick(HEALTH_TICK_MS);
+                mock.timers.tick(HEALTH_TICK_MS);
+                assert.equal(healthMsgsFor(h.sent, id).length, 1, "dedupe across repeated ticks");
+
+                await reapRun({ id, pid });
+            } finally {
+                setIdentityProbeForTests(undefined);
+                h.shutdown();
+                writeFakePi(SLEEP_SCRIPT);
+            }
+        });
+    });
+
+    it("lost transition sends one explicit followUp when callback:true", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            try {
+                const id = nextRunId();
+                dirOnly.push(id);
+                writeMeta({
+                    id,
+                    status: "running",
+                    pid: DEAD_PID,
+                    pgid: DEAD_PID,
+                    pidStartTime: "gone-token",
+                    spawnPid: process.pid,
+                    cwd: tmpdir(),
+                    promptPreview: "p",
+                    startedAt: Date.now(),
+                    logPath: join(runDir(id), "output.log"),
+                    sessionId: id,
+                    callback: true,
+                });
+                writeFileSync(join(runDir(id), "output.log"), "lost-before-complete\n");
+
+                await h.handlers.get("session_start")({}, h.ctx);
+                mock.timers.tick(HEALTH_TICK_MS);
+
+                assert.equal(readMeta(id).status, "lost");
+                const msgs = healthMsgsFor(h.sent, id);
+                assert.equal(msgs.length, 1, `exactly one lost health callback for ${id}; got ${msgs.length}`);
+                assert.equal(msgs[0].options.deliverAs, "followUp");
+                assert.equal(msgs[0].options.triggerTurn, true);
+                assert.match(msgs[0].message.content, /ATTENTION/i);
+                assert.match(msgs[0].message.content, /no related process remains/i);
+                assert.match(msgs[0].message.content, /no coherent terminal/i);
+                assert.match(msgs[0].message.content, /subagent_result/);
+                assert.ok(readMeta(id).lostCallbackSentAt > 0, "durable lost callback marker");
+
+                // Reload / further ticks: marker survives, no second delivery.
+                mock.timers.tick(HEALTH_TICK_MS);
+                // Simulate /reload: session_start again with marker already on disk.
+                await h.handlers.get("session_start")({}, h.ctx);
+                mock.timers.tick(HEALTH_TICK_MS);
+                assert.equal(healthMsgsFor(h.sent, id).length, 1, "dedupe survives reload + ticks");
+            } finally {
+                h.shutdown();
+            }
+        });
+    });
+
+    it("callback:false suppresses model follow-up but keeps human notify", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            try {
+                const id = nextRunId();
+                dirOnly.push(id);
+                writeMeta({
+                    id,
+                    status: "running",
+                    pid: DEAD_PID,
+                    pgid: DEAD_PID,
+                    pidStartTime: "gone-token",
+                    spawnPid: process.pid,
+                    cwd: tmpdir(),
+                    promptPreview: "p",
+                    startedAt: Date.now(),
+                    logPath: join(runDir(id), "output.log"),
+                    sessionId: id,
+                    callback: false,
+                });
+                writeFileSync(join(runDir(id), "output.log"), "quiet-lost\n");
+
+                await h.handlers.get("session_start")({}, h.ctx);
+                mock.timers.tick(HEALTH_TICK_MS);
+
+                assert.equal(readMeta(id).status, "lost");
+                assert.equal(healthMsgsFor(h.sent, id).length, 0, "no model follow-up when callback:false");
+                assert.ok(
+                    h.notes.some((n) => n.level === "warning" && n.msg.includes(id) && /lost/i.test(n.msg)),
+                    "human notify still fires under callback:false",
+                );
+                // Marker still set after intentional callback:false suppression so
+                // recovery does not keep retrying the suppressed model path.
+                assert.ok(readMeta(id).lostCallbackSentAt > 0, "marker still written for dedupe");
+            } finally {
+                h.shutdown();
+            }
+        });
+    });
+
+    it("pre-marked meta does not re-fire after reload (durable dedupe)", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            try {
+                const id = nextRunId();
+                dirOnly.push(id);
+                // Already orphaned with marker from a prior session.
+                writeMeta({
+                    id,
+                    status: "orphaned",
+                    pid: DEAD_PID,
+                    pgid: DEAD_PID,
+                    pidStartTime: "gone-token",
+                    spawnPid: process.pid,
+                    cwd: tmpdir(),
+                    promptPreview: "p",
+                    startedAt: Date.now() - 60_000,
+                    orphanedAt: Date.now() - 30_000,
+                    orphanedCallbackSentAt: Date.now() - 30_000,
+                    logPath: join(runDir(id), "output.log"),
+                    sessionId: id,
+                    callback: true,
+                });
+                writeFileSync(join(runDir(id), "output.log"), "premarked\n");
+
+                await h.handlers.get("session_start")({}, h.ctx);
+                // First tick with no group evidence advances orphaned → lost and
+                // should fire ONLY the lost callback (orphaned already marked).
+                mock.timers.tick(HEALTH_TICK_MS);
+                assert.equal(readMeta(id).status, "lost");
+                const msgs = healthMsgsFor(h.sent, id);
+                assert.equal(msgs.length, 1, "only the new lost transition fires for this run");
+                assert.match(msgs[0].message.content, /status lost|is lost/i);
+                assert.doesNotMatch(msgs[0].message.content, /may still be alive/i);
+            } finally {
+                h.shutdown();
+            }
+        });
+    });
+
+    it("persisted unmarked orphaned recovers one callback after reload without a fresh transition", async () => {
+        writeFakePi(TRAP_FAIL_SCRIPT);
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            setIdentityProbeForTests(fakeSpawnIdentityProbe());
+            try {
+                const { id, pid } = await spawnRun(h);
+                // Persist orphaned from a prior session WITHOUT a handoff marker.
+                // Live process-group evidence keeps reconcileRun at changed:false
+                // (orphaned-kept), so recovery must not depend on a new transition.
+                writeMeta({
+                    ...readMeta(id),
+                    status: "orphaned",
+                    pid: DEAD_PID,
+                    orphanedAt: Date.now() - 60_000,
+                    callback: true,
+                });
+                // Drop any in-memory marker field if present.
+                const disk = readMeta(id);
+                assert.equal(disk.orphanedCallbackSentAt, undefined, "fixture starts unmarked");
+
+                await h.handlers.get("session_start")({}, h.ctx);
+                mock.timers.tick(HEALTH_TICK_MS);
+
+                assert.equal(readMeta(id).status, "orphaned", "live group evidence keeps orphaned");
+                const msgs = healthMsgsFor(h.sent, id);
+                assert.equal(msgs.length, 1, `exactly one recovered orphaned callback; got ${msgs.length}`);
+                assert.equal(msgs[0].options.deliverAs, "followUp");
+                assert.equal(msgs[0].options.triggerTurn, true);
+                assert.match(msgs[0].message.content, /ATTENTION/i);
+                assert.match(msgs[0].message.content, /may still be alive/i);
+                assert.ok(readMeta(id).orphanedCallbackSentAt > 0, "marker written after successful handoff");
+
+                // Reload + ticks must not re-fire.
+                mock.timers.tick(HEALTH_TICK_MS);
+                await h.handlers.get("session_start")({}, h.ctx);
+                mock.timers.tick(HEALTH_TICK_MS);
+                assert.equal(healthMsgsFor(h.sent, id).length, 1, "dedupe after recovered handoff");
+
+                await reapRun({ id, pid });
+            } finally {
+                setIdentityProbeForTests(undefined);
+                h.shutdown();
+                writeFakePi(SLEEP_SCRIPT);
+            }
+        });
+    });
+
+    it("persisted unmarked lost recovers one callback after reload", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            try {
+                const id = nextRunId();
+                dirOnly.push(id);
+                // Already terminal-lost from a prior session, marker missing.
+                // Lost is excluded from process monitoring, so recovery must
+                // scan unmarked lost independently of reconcile transitions.
+                writeMeta({
+                    id,
+                    status: "lost",
+                    pid: DEAD_PID,
+                    pgid: DEAD_PID,
+                    pidStartTime: "gone-token",
+                    spawnPid: process.pid,
+                    cwd: tmpdir(),
+                    promptPreview: "p",
+                    startedAt: Date.now() - 120_000,
+                    orphanedAt: Date.now() - 90_000,
+                    lostAt: Date.now() - 60_000,
+                    endedAt: Date.now() - 60_000,
+                    logPath: join(runDir(id), "output.log"),
+                    sessionId: id,
+                    callback: true,
+                });
+                writeFileSync(join(runDir(id), "output.log"), "lost-unmarked\n");
+                assert.equal(readMeta(id).lostCallbackSentAt, undefined);
+
+                await h.handlers.get("session_start")({}, h.ctx);
+                assert.equal(isHealthTickerActive(), true, "unmarked lost keeps the health ticker alive");
+                mock.timers.tick(HEALTH_TICK_MS);
+
+                assert.equal(readMeta(id).status, "lost");
+                const msgs = healthMsgsFor(h.sent, id);
+                assert.equal(msgs.length, 1, `exactly one recovered lost callback; got ${msgs.length}`);
+                assert.equal(msgs[0].options.deliverAs, "followUp");
+                assert.equal(msgs[0].options.triggerTurn, true);
+                assert.match(msgs[0].message.content, /ATTENTION/i);
+                assert.match(msgs[0].message.content, /no related process remains/i);
+                assert.ok(readMeta(id).lostCallbackSentAt > 0, "marker written after successful handoff");
+                assert.equal(isHealthTickerActive(), false, "ticker stops after marked lost has nothing left to monitor");
+
+                // Reload after successful handoff must not re-fire.
+                await h.handlers.get("session_start")({}, h.ctx);
+                mock.timers.tick(HEALTH_TICK_MS);
+                assert.equal(healthMsgsFor(h.sent, id).length, 1, "dedupe after recovered lost handoff");
+            } finally {
+                h.shutdown();
+            }
+        });
+    });
+
+    it("failed callback handoff is not permanently suppressed; reload delivers one later success", async () => {
+        await withFakeClock(async () => {
+            let failNext = true;
+            const tools = new Map();
+            const handlers = new Map();
+            const sent = [];
+            const notes = [];
+            const pi = {
+                registerTool: (def) => tools.set(def.name, def),
+                on: (event, fn) => handlers.set(event, fn),
+                sendMessage: (message, options) => {
+                    if (failNext) {
+                        failNext = false;
+                        throw new Error("simulated host delivery failure");
+                    }
+                    sent.push({ message, options });
+                },
+            };
+            const ctx = {
+                cwd: tmpdir(),
+                hasUI: false,
+                ui: { notify: (msg, level) => notes.push({ msg, level }), setWidget: () => {} },
+                model: undefined,
+            };
+            betterSubagents(pi);
+            const shutdown = () => handlers.get("session_shutdown")?.({}, ctx);
+            try {
+                const id = nextRunId();
+                dirOnly.push(id);
+                writeMeta({
+                    id,
+                    status: "lost",
+                    pid: DEAD_PID,
+                    pgid: DEAD_PID,
+                    pidStartTime: "gone-token",
+                    spawnPid: process.pid,
+                    cwd: tmpdir(),
+                    promptPreview: "p",
+                    startedAt: Date.now() - 120_000,
+                    lostAt: Date.now() - 60_000,
+                    endedAt: Date.now() - 60_000,
+                    logPath: join(runDir(id), "output.log"),
+                    sessionId: id,
+                    callback: true,
+                });
+                writeFileSync(join(runDir(id), "output.log"), "handoff-fail\n");
+
+                await handlers.get("session_start")({}, ctx);
+                mock.timers.tick(HEALTH_TICK_MS);
+
+                assert.equal(healthMsgsFor(sent, id).length, 0, "failed handoff must not count as delivered");
+                assert.equal(
+                    readMeta(id).lostCallbackSentAt,
+                    undefined,
+                    "marker must NOT be written before successful handoff",
+                );
+                assert.equal(isHealthTickerActive(), true, "failed handoff keeps recovery armed");
+
+                // Simulate /reload after the host recovered: next handoff succeeds once.
+                await handlers.get("session_start")({}, ctx);
+                mock.timers.tick(HEALTH_TICK_MS);
+
+                const msgs = healthMsgsFor(sent, id);
+                assert.equal(msgs.length, 1, `exactly one successful recovery callback; got ${msgs.length}`);
+                assert.equal(msgs[0].options.deliverAs, "followUp");
+                assert.equal(msgs[0].options.triggerTurn, true);
+                assert.match(msgs[0].message.content, /ATTENTION/i);
+                assert.ok(readMeta(id).lostCallbackSentAt > 0, "marker written only after successful handoff");
+
+                // Further reload/ticks stay at exactly one.
+                await handlers.get("session_start")({}, ctx);
+                mock.timers.tick(HEALTH_TICK_MS);
+                assert.equal(healthMsgsFor(sent, id).length, 1, "no second delivery after success");
+            } finally {
+                shutdown();
+            }
+        });
     });
 });
