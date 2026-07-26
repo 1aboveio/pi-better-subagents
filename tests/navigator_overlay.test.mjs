@@ -645,18 +645,19 @@ describe("navigator overlay component", () => {
         await Promise.resolve();
         assert.deepEqual(o.customCalls, [{ overlay: true }], "must request overlay mode (pi focuses overlays on show)");
         const lines = o.component().render(80);
-        assert.equal(lines.length, 4, "title + 2 rows + help");
+        assert.equal(lines.length, 7, "command sheet: title + actions + spacer + 2 rows + spacer + rail");
         const plain = lines.map((l) => l.replace(/<\/?[a-z]*>/g, ""));
         assert.ok(plain[0].includes("Subagents · 2"));
-        assert.ok(plain[1].startsWith("> "), "first row selected by default");
+        assert.ok(plain[1].includes("Enter view"), "action bar sits under the title rail");
+        assert.ok(plain[3].startsWith("›  "), "first row selected by default");
         // #69 scan order: name · model · elapsed · status (status last).
-        assert.ok(plain[1].includes("newest · grok-4.5 · 5s · running"), plain[1]);
-        assert.ok(plain[2].startsWith("  "));
-        assert.ok(plain[2].includes("sa_2 · ? · 1m 01s · 1.2k tok") && plain[2].includes("completed"),
-            `unnamed run shows its id, spend, status last: ${plain[2]}`);
-        assert.ok(plain[3].includes("esc"), "help line advertises escape");
-        assert.ok(plain[3].includes("x stop"), "running selection labels x as stop, not close");
-        assert.ok(!plain[3].includes("x close"), "x action must not collide with esc close wording");
+        assert.ok(plain[3].includes("newest · grok-4.5 · 5s · running"), plain[3]);
+        assert.ok(plain[4].startsWith("   "));
+        assert.ok(plain[4].includes("sa_2 · ? · 1m 01s · 1.2k tok") && plain[4].includes("completed"),
+            `unnamed run shows its id, spend, status last: ${plain[4]}`);
+        assert.ok(plain[1].includes("Esc"), "action bar advertises escape");
+        assert.ok(plain[1].includes("x stop"), "running selection labels x as stop, not close");
+        assert.ok(!plain[1].includes("x close"), "x action must not collide with Esc close wording");
     });
 
     // @covers navigator.overlay
@@ -666,8 +667,8 @@ describe("navigator overlay component", () => {
             { id: "sa_done", status: "completed", model: "?", elapsed: "1s", spend: "" },
         ]);
         const lines = buildNavigatorLines(state, { width: 80 }).map((l) => l.replace(/<\/?[a-z]*>/g, ""));
-        assert.ok(lines.at(-1).includes("x dismiss"), lines.at(-1));
-        assert.ok(lines.at(-1).includes("esc close"), lines.at(-1));
+        assert.ok(lines[1].includes("x dismiss"), lines[1]);
+        assert.ok(lines[1].includes("Esc close"), lines[1]);
     });
 
     // @covers navigator.overlay
@@ -689,12 +690,13 @@ describe("navigator overlay component", () => {
     it("an empty list renders an explicit placeholder (defensive; open normally refuses empty)", () => {
         const state = createNavigatorState([]);
         const lines = buildNavigatorLines(state, { width: 40 });
-        assert.equal(lines[0], "Subagents · 0");
-        assert.equal(lines[1], "  (no visible subagent runs)");
-        assert.ok(lines[lines.length - 1].includes("esc"), "help advertises escape");
-        assert.ok(lines[lines.length - 1].includes("enter") || lines[lines.length - 1].includes("↑↓"), "help lists navigation");
-        // Keep the exact empty-list shape pinned (title + placeholder + help).
-        assert.equal(lines.length, 3);
+        assert.ok(lines[0].includes("Subagents · 0"));
+        assert.ok(lines[0].startsWith("━━ "));
+        assert.equal(lines[3], "   (no visible subagent runs)");
+        assert.ok(lines[1].includes("Esc"), "action bar advertises escape");
+        assert.ok(lines[1].includes("Enter") || lines[1].includes("↑↓"), "action bar lists navigation");
+        // Keep the exact empty-list command sheet pinned.
+        assert.equal(lines.length, 6);
     });
 
     // @covers navigator.overlay
@@ -710,12 +712,12 @@ describe("navigator overlay component", () => {
         o.press("<down>");
         assert.equal(o.tui.renders, 1);
         let plain = o.component().render(80).map((l) => l.replace(/<\/?[a-z]*>/g, ""));
-        assert.ok(plain[2].startsWith("> "), "selection moved to the second row");
+        assert.ok(plain[4].startsWith("›  "), "selection moved to the second row");
         o.press("<down>");
         assert.equal(o.tui.renders, 1, "clamped at the bottom");
         o.press("<up>");
         plain = o.component().render(80).map((l) => l.replace(/<\/?[a-z]*>/g, ""));
-        assert.ok(plain[1].startsWith("> "));
+        assert.ok(plain[3].startsWith("›  "));
     });
 
     // @covers navigator.overlay

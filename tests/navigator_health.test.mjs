@@ -34,6 +34,7 @@ import {
     buildDetailLines,
     createNavigatorState,
     createNavigatorOverlayComponent,
+    navigatorSectionLabel,
 } from "../navigator.ts";
 import { observeRunHealth } from "../health-observation.ts";
 import { fmtElapsed, shortModel, fmtSpend } from "../widget.ts";
@@ -216,7 +217,7 @@ describe("navigator health row order", () => {
                 healthFor: () => healthy,
             }),
         ), { width: 120 });
-        const row = strip(lines[1]);
+        const row = strip(lines[3]);
         assert.ok(row.includes("running"));
         assert.ok(!/stale|compact|error|long /.test(row), row);
     });
@@ -311,18 +312,18 @@ describe("navigator status colorization", () => {
             colorizeStatus: true,
             fg: themeFg,
         });
-        // title + 6 rows + help
-        assert.equal(lines.length, 8);
+        // title + actions + spacer + 6 rows + spacer + bottom rail
+        assert.equal(lines.length, 11);
         const plain = lines.map(strip);
-        assert.ok(plain[1].includes("alpha · m · 1s · running"));
-        assert.ok(plain[2].includes("beta · m · 2s · failed · stale"));
+        assert.ok(plain[3].includes("alpha · m · 1s · running"));
+        assert.ok(plain[4].includes("beta · m · 2s · failed · stale"));
         // Color markers present on status tokens only.
-        assert.ok(lines[1].includes("<accent>running</>"), lines[1]);
-        assert.ok(lines[2].includes("<danger>failed</>"), lines[2]);
-        assert.ok(lines[3].includes("<warning>orphaned</>"), lines[3]);
-        assert.ok(lines[4].includes("<danger>lost</>"), lines[4]);
-        assert.ok(lines[5].includes("<success>completed</>"), lines[5]);
-        assert.ok(lines[6].includes("<warning>killed</>"), lines[6]);
+        assert.ok(lines[3].includes("<accent>running</>"), lines[3]);
+        assert.ok(lines[4].includes("<danger>failed</>"), lines[4]);
+        assert.ok(lines[5].includes("<warning>orphaned</>"), lines[5]);
+        assert.ok(lines[6].includes("<danger>lost</>"), lines[6]);
+        assert.ok(lines[7].includes("<success>completed</>"), lines[7]);
+        assert.ok(lines[8].includes("<warning>killed</>"), lines[8]);
 
         for (const w of [20, 37, 80]) {
             const narrow = buildNavigatorLines(state, {
@@ -366,10 +367,10 @@ describe("navigator status colorization", () => {
             done,
         );
         const lines = component.render(80);
-        const row = lines[1];
+        const row = lines[3];
         assert.ok(row.includes("<danger>failed</>"), row);
         // Selected marker is accent, but status keeps danger.
-        assert.ok(row.includes(">") && row.includes("<danger>failed</>"), row);
+        assert.ok(row.includes("›") && row.includes("<danger>failed</>"), row);
         assert.ok(visibleWidth(row) <= 80);
         // List-mode render does not arm timers, but dispose is still the
         // required teardown contract for any overlay component instance.
@@ -439,7 +440,7 @@ describe("navigator detail health sections", () => {
         }).map(strip);
         const text = lines.join("\n");
 
-        assert.ok(lines.some((l) => l.startsWith("status") && l.includes("orphaned")), text);
+        assert.ok(lines.some((l) => l.trimStart().startsWith("status") && l.includes("orphaned")), text);
         assert.ok(text.includes("model   grok-4.5 · effort max"), text);
         assert.ok(text.includes("process"), text);
         assert.ok(/pid 4242/.test(text) && /pgid 4242/.test(text), text);
@@ -449,9 +450,10 @@ describe("navigator detail health sections", () => {
         assert.ok(/compacting/.test(text), text);
         assert.ok(text.includes("active tool"), text);
         // Compaction section is separate from active tool and model.
-        const compactIdx = lines.findIndex((l) => l === "compaction");
-        const toolIdx = lines.findIndex((l) => l === "active tool");
-        const modelIdx = lines.findIndex((l) => l === "model");
+        const sectionIdx = (label) => lines.findIndex((l) => navigatorSectionLabel(l) === label);
+        const compactIdx = sectionIdx("compaction");
+        const toolIdx = sectionIdx("active tool");
+        const modelIdx = sectionIdx("model");
         assert.ok(compactIdx > 0 && toolIdx > compactIdx && modelIdx > toolIdx, text);
         assert.ok(/long_running|bash/.test(text), text);
         assert.ok(/state error|model error|net down/.test(text), text);
@@ -494,7 +496,7 @@ describe("navigator detail health sections", () => {
             now: NOW,
         }, { width: 80 }).map(strip);
 
-        const idx = (label) => lines.findIndex((l) => l === label);
+        const idx = (label) => lines.findIndex((l) => navigatorSectionLabel(l) === label);
         assert.ok(idx("compaction") >= 0);
         assert.ok(idx("active tool") > idx("compaction"));
         assert.ok(idx("model") > idx("active tool"));

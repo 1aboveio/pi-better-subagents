@@ -253,6 +253,43 @@ export function moveSelection(state, delta) {
 // List rendering
 // ---------------------------------------------------------------------------
 
+const SHEET_RULE = "━";
+const SECTION_RULE = "─";
+const LIST_ROW_START = 3;
+
+function repeatRule(glyph, width) {
+    const n = Math.max(0, Math.floor(width));
+    return glyph.repeat(n);
+}
+
+function commandSheetRule(label, width) {
+    const w = Math.max(0, Math.floor(width));
+    if (w <= 0) return "";
+    const text = label != null && String(label).length > 0 ? String(label) : "";
+    if (!text) return repeatRule(SHEET_RULE, w);
+    const prefix = `${SHEET_RULE}${SHEET_RULE} ${text} `;
+    if (visibleWidth(prefix) >= w) return truncateToVisibleWidth(prefix, w);
+    return prefix + repeatRule(SHEET_RULE, w - visibleWidth(prefix));
+}
+
+function sectionRule(label, width) {
+    const w = Math.max(0, Math.floor(width));
+    if (w <= 0) return "";
+    const prefix = `${SECTION_RULE}${SECTION_RULE} ${label} `;
+    if (visibleWidth(prefix) >= w) return truncateToVisibleWidth(prefix, w);
+    return prefix + repeatRule(SECTION_RULE, w - visibleWidth(prefix));
+}
+
+function stripSectionRule(line) {
+    const plain = String(line ?? "");
+    const match = plain.match(/^──\s+(.+?)\s+─*$/u);
+    return match ? match[1] : null;
+}
+
+export function navigatorSectionLabel(line) {
+    return stripSectionRule(line);
+}
+
 /**
  * Format one navigator row in scan order (#60/#69):
  *   name/id · model [· effort] · elapsed [· tool] [· spend] · status [· fact · fact]
@@ -300,22 +337,25 @@ export function buildNavigatorLines(state, opts = {}) {
     const width = opts.width ?? 80;
     const truncate = opts.truncate ?? truncateToVisibleWidth;
     const rows = state.rows ?? [];
-    const lines = [`Subagents · ${rows.length}`];
+    const lines = [commandSheetRule(`Subagents · ${rows.length}`, width)];
+    const selected = rows.length > 0 ? rows[state.selected] : null;
+    const stoppable = selected?.status === "running" || selected?.status === "orphaned";
+    const action = stoppable ? "x stop" : (selected ? "x dismiss" : null);
+    lines.push(`   ${["↑↓ select", "Enter view", action, "Esc close"].filter(Boolean).join(" · ")}`);
+    lines.push("");
     if (rows.length === 0) {
-        lines.push("  (no visible subagent runs)");
+        lines.push("   (no visible subagent runs)");
     }
     const colorize = opts.colorizeStatus === true;
     const fg = opts.fg;
     for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
-        const prefix = i === state.selected ? "> " : "  ";
+        const prefix = i === state.selected ? "›  " : "   ";
         const body = formatNavigatorRowText(r, { colorizeStatus: colorize, fg });
         lines.push(prefix + body);
     }
-    const selected = rows.length > 0 ? rows[state.selected] : null;
-    const stoppable = selected?.status === "running" || selected?.status === "orphaned";
-    const action = stoppable ? "x stop" : (selected ? "x dismiss" : null);
-    lines.push(["↑↓ select", "enter open", action, "esc close"].filter(Boolean).join(" · "));
+    lines.push("");
+    lines.push(commandSheetRule("", width));
     return lines.map((l) => {
         const cut = truncate(l, width);
         // Guarantee visible width even if host truncator counts ANSI bytes.
@@ -425,37 +465,48 @@ export function buildDetailLines(detail, opts = {}) {
     const fg = typeof opts.fg === "function" ? opts.fg : null;
     const colorize = opts.colorizeStatus === true && fg;
     if (!detail) {
-        return ["(run unavailable)", "← back · esc close"].map((l) => truncate(l, width));
+        return [
+            commandSheetRule("Run unavailable", width),
+            "   ← back · Esc close",
+            "",
+            commandSheetRule("", width),
+        ].map((l) => truncate(l, width));
     }
     const title = detail.name || detail.id || "?";
     const lines = [];
-    lines.push(title);
+    lines.push(commandSheetRule(title, width));
 
     const statusRaw = String(detail.status ?? "?");
     const statusText = colorize ? fg(statusThemeColor(statusRaw), statusRaw) : statusRaw;
-    lines.push(`status  ${statusText}`);
+
+    const stoppable = detail.status === "running" || detail.status === "orphaned";
+    const action = stoppable ? "x stop" : "x dismiss";
+    lines.push(`   ← back · ${action} · Esc close`);
+    lines.push("");
+    lines.push(`   status  ${statusText}`);
 
     const model = detail.model ?? "?";
-    lines.push(detail.effort ? `model   ${model} · effort ${detail.effort}` : `model   ${model}`);
-    lines.push(`elapsed ${detail.elapsed ?? "?"}`);
+    lines.push(detail.effort ? `   model   ${model} · effort ${detail.effort}` : `   model   ${model}`);
+    lines.push(`   elapsed ${detail.elapsed ?? "?"}`);
 
     // Legacy tools summary (still useful as a used-tools list).
     const toolsLabel = detail.currentTool
-        ? `current ${detail.currentTool}`
+        ? `tools   current ${detail.currentTool}`
         : (detail.tools ? `tools   ${detail.tools}` : "tools   (none)");
-    lines.push(toolsLabel);
-    lines.push(detail.spend ? `spend   ${detail.spend}` : "spend   (none)");
+    lines.push(`   ${toolsLabel}`);
+    lines.push(detail.spend ? `   spend   ${detail.spend}` : "   spend   (none)");
 
     const h = detail.health;
     const now = detail.now;
 
-    // ---- process / liveness
-    lines.push("process");
+    // Process / liveness.
+    lines.push("");
+    lines.push(sectionRule("process", width));
     const pid = detail.pid != null ? String(detail.pid) : "—";
     const pgid = detail.pgid != null ? String(detail.pgid) : "—";
     const startTok = detail.pidStartTime != null ? String(detail.pidStartTime) : "—";
-    lines.push(`  pid ${pid} · pgid ${pgid}`);
-    lines.push(`  start-token ${startTok}`);
+    lines.push(`   pid ${pid} · pgid ${pgid}`);
+    lines.push(`   start-token ${startTok}`);
     // Prefer observation liveness, but never claim "supervised" when the
     // detail header already shows a non-running effective status (legacy
     // dead-running metadata → effective "exited" must read as terminal).
@@ -466,121 +517,121 @@ export function buildDetailLines(detail, opts = {}) {
             : detail.status === "running" ? "supervised"
             : "terminal";
     }
-    lines.push(`  liveness ${live}`);
-    if (detail.orphanedAt != null) lines.push(`  orphaned ${fmtDetailTs(detail.orphanedAt, now)}`);
-    if (detail.lostAt != null) lines.push(`  lost ${fmtDetailTs(detail.lostAt, now)}`);
+    lines.push(`   liveness ${live}`);
+    if (detail.orphanedAt != null) lines.push(`   orphaned ${fmtDetailTs(detail.orphanedAt, now)}`);
+    if (detail.lostAt != null) lines.push(`   lost ${fmtDetailTs(detail.lostAt, now)}`);
 
-    // ---- activity
-    lines.push("activity");
-    lines.push(`  ${h?.activity ?? "—"}`);
+    // Activity.
+    lines.push(sectionRule("activity", width));
+    lines.push(`   ${h?.activity ?? "—"}`);
     if (h?.meaningfulAgeMs != null) {
-        lines.push(`  last meaningful ${fmtDetailAge(h.meaningfulAgeMs)} ago`);
+        lines.push(`   last meaningful ${fmtDetailAge(h.meaningfulAgeMs)} ago`);
     } else if (h?.lastMeaningfulAt != null) {
-        lines.push(`  last meaningful ${fmtDetailTs(h.lastMeaningfulAt, now)}`);
+        lines.push(`   last meaningful ${fmtDetailTs(h.lastMeaningfulAt, now)}`);
     }
 
-    // ---- compaction (separate section)
-    lines.push("compaction");
+    // Compaction, separate from tool and model state.
+    lines.push(sectionRule("compaction", width));
     if (h?.compaction) {
         const c = h.compaction;
         const age = c.ageMs != null ? ` · ${fmtDetailAge(c.ageMs)}` : "";
-        lines.push(`  ${c.state}${age}`);
+        lines.push(`   ${c.state}${age}`);
         if (c.last) {
             const bits = [];
             if (c.last.reason) bits.push(c.last.reason);
             if (c.last.aborted) bits.push("aborted");
             if (c.last.errorMessage) bits.push(c.last.errorMessage);
-            if (bits.length) lines.push(`  last ${bits.join(" · ")}`);
+            if (bits.length) lines.push(`   last ${bits.join(" · ")}`);
         }
     } else {
-        lines.push("  —");
+        lines.push("   —");
     }
 
-    // ---- active tool (separate from compaction + model)
-    lines.push("active tool");
+    // Active tool, separate from compaction and model state.
+    lines.push(sectionRule("active tool", width));
     if (h?.tool) {
         const t = h.tool;
         if (t.state === "idle" || !t.active) {
-            lines.push("  idle");
+            lines.push("   idle");
         } else {
             const age = t.ageMs != null ? ` · ${fmtDetailAge(t.ageMs)}` : "";
-            lines.push(`  ${t.state} · ${t.active.toolName}${age}`);
+            lines.push(`   ${t.state} · ${t.active.toolName}${age}`);
         }
     } else if (detail.currentTool) {
-        lines.push(`  ${detail.currentTool}`);
+        lines.push(`   ${detail.currentTool}`);
     } else {
-        lines.push("  idle");
+        lines.push("   idle");
     }
 
-    // ---- model call / error (separate)
-    lines.push("model");
+    // Model call / error, separate from tool state.
+    lines.push(sectionRule("model", width));
     if (h?.model) {
         const m = h.model;
-        lines.push(`  state ${m.state}`);
-        if (m.listWarning) lines.push(`  warning ${m.listWarning}`);
+        lines.push(`   state ${m.state}`);
+        if (m.listWarning) lines.push(`   warning ${m.listWarning}`);
         if (m.retry) {
             const a = m.retry.attempt != null ? String(m.retry.attempt) : "?";
             const max = m.retry.maxAttempts != null ? String(m.retry.maxAttempts) : "?";
-            lines.push(`  retry ${a}/${max}`);
+            lines.push(`   retry ${a}/${max}`);
         }
         if (m.lastError) {
             const age = m.lastError.at != null ? ` · ${fmtDetailTs(m.lastError.at, now)}` : "";
-            lines.push(`  last error ${m.lastError.message}${age}`);
+            lines.push(`   last error ${m.lastError.message}${age}`);
         }
         if (Array.isArray(m.errorHistory) && m.errorHistory.length > 0) {
             const recent = m.errorHistory.slice(-3);
             for (const e of recent) {
                 const age = e.at != null ? ` · ${fmtDetailTs(e.at, now)}` : "";
-                lines.push(`  history ${e.message}${age}`);
+                lines.push(`   history ${e.message}${age}`);
             }
         }
         if (m.longModelCall) {
             const age = m.longModelCall.ageMs != null ? ` · ${fmtDetailAge(m.longModelCall.ageMs)}` : "";
-            lines.push(`  long call${age}`);
+            lines.push(`   long call${age}`);
         }
     } else {
-        lines.push("  —");
+        lines.push("   —");
     }
 
-    // ---- last log write (diagnostic)
-    lines.push("log");
+    // Last log write.
+    lines.push(sectionRule("log", width));
     if (h?.rawLog && (h.rawLog.mtimeMs != null || h.rawLog.sizeBytes != null || h.rawLog.error)) {
-        if (h.rawLog.mtimeMs != null) lines.push(`  last write ${fmtDetailTs(h.rawLog.mtimeMs, now)}`);
-        if (h.rawLog.sizeBytes != null) lines.push(`  size ${h.rawLog.sizeBytes}B`);
-        if (h.rawLog.error) lines.push(`  error ${h.rawLog.error}`);
+        if (h.rawLog.mtimeMs != null) lines.push(`   last write ${fmtDetailTs(h.rawLog.mtimeMs, now)}`);
+        if (h.rawLog.sizeBytes != null) lines.push(`   size ${h.rawLog.sizeBytes}B`);
+        if (h.rawLog.error) lines.push(`   error ${h.rawLog.error}`);
     } else {
-        lines.push("  —");
+        lines.push("   —");
     }
 
-    // ---- thresholds
-    lines.push("thresholds");
+    // Thresholds.
+    lines.push(sectionRule("thresholds", width));
     if (h?.thresholds) {
         const t = h.thresholds;
-        lines.push(`  quiet ${fmtDetailAge(t.quietMs)} · stale ${fmtDetailAge(t.staleMs)}`);
-        lines.push(`  long-tool ${fmtDetailAge(t.longToolMs)} · long-compact ${fmtDetailAge(t.longCompactionMs)}`);
+        lines.push(`   quiet ${fmtDetailAge(t.quietMs)} · stale ${fmtDetailAge(t.staleMs)}`);
+        lines.push(`   long-tool ${fmtDetailAge(t.longToolMs)} · long-compact ${fmtDetailAge(t.longCompactionMs)}`);
     } else {
-        lines.push("  —");
+        lines.push("   —");
     }
 
-    // ---- callback notification timestamps
-    lines.push("callbacks");
+    // Callback notification timestamps.
+    lines.push(sectionRule("callbacks", width));
     const cbOrphan = detail.orphanedCallbackSentAt;
     const cbLost = detail.lostCallbackSentAt;
     if (cbOrphan != null || cbLost != null) {
-        if (cbOrphan != null) lines.push(`  orphaned notified ${fmtDetailTs(cbOrphan, now)}`);
-        if (cbLost != null) lines.push(`  lost notified ${fmtDetailTs(cbLost, now)}`);
+        if (cbOrphan != null) lines.push(`   orphaned notified ${fmtDetailTs(cbOrphan, now)}`);
+        if (cbLost != null) lines.push(`   lost notified ${fmtDetailTs(cbLost, now)}`);
     } else {
-        lines.push("  (none)");
+        lines.push("   (none)");
     }
 
-    lines.push("output");
+    lines.push(sectionRule("output", width));
     const body = detail.output && String(detail.output).trim() ? String(detail.output) : "(no output yet)";
     for (const raw of body.split(/\r?\n/)) {
-        lines.push(raw.length ? raw : " ");
+        lines.push(raw.length ? `   ${raw}` : "   ");
     }
-    const stoppable = detail.status === "running" || detail.status === "orphaned";
-    const action = stoppable ? "x stop" : "x dismiss";
-    lines.push(`← back · ${action} · esc close`);
+    lines.push("");
+    lines.push(`   ← back · ${action} · Esc close`);
+    lines.push(commandSheetRule("", width));
     return lines.map((l) => {
         const cut = truncate(l, width);
         return visibleWidth(cut) > width ? truncateToVisibleWidth(cut, width) : cut;
@@ -865,7 +916,10 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
                 });
                 return lines.map((line, i) => {
                     if (i === 0) return fg("accent", line);
+                    if (i === 1) return fg("dim", line);
                     if (i === lines.length - 1) return fg("dim", line);
+                    if (stripSectionRule(line)) return fg("dim", line);
+                    if (line.trimStart().startsWith("← back")) return fg("dim", line);
                     return line;
                 });
             }
@@ -877,12 +931,12 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
             });
             return lines.map((line, i) => {
                 if (i === 0) return fg("accent", line);
-                if (i === lines.length - 1) return fg("dim", line);
+                if (i === 1 || i === lines.length - 1) return fg("dim", line);
                 // Selected row: keep the line readable without recoloring the
                 // already-semantic status token (status is colored in-body).
-                if (state.rows.length > 0 && i === 1 + state.selected) {
-                    return line.startsWith("> ")
-                        ? fg("accent", "> ") + line.slice(2)
+                if (state.rows.length > 0 && i === LIST_ROW_START + state.selected) {
+                    return line.startsWith("›  ")
+                        ? fg("accent", "›  ") + line.slice(3)
                         : fg("accent", line);
                 }
                 return line;

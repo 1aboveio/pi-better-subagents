@@ -264,6 +264,9 @@ is unchanged in every mode.
 
 ### Overlay list view
 
+- The overlay renders as a borderless command sheet: a strong title rail,
+  inset action bar, inset rows, and a bottom rail. This keeps it visually
+  distinct from transcript content without drawing a full box around the UI.
 - The overlay list is available after returning from detail with `←`. Newest
   visible runs appear first (running and terminal). Dismissed runs are hidden
   from this list and from the running-count affordance only.
@@ -281,6 +284,8 @@ is unchanged in every mode.
 
 ### Detail view
 
+- Detail uses the same command-sheet treatment, with section rules for the
+  inspector groups and command bars at the top and bottom of the view.
 - Shows status (colorized), model/effort, elapsed, tools, spend, and parsed
   output, plus sectioned health: process identity/liveness, activity,
   compaction, active tool, model call/error, last log write, thresholds, and
