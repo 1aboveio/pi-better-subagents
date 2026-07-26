@@ -45,5 +45,8 @@
   "round5": {
     "notes": "Complete JSON grammar authority: oversized trailing-comma agent_end and malformed tool_execution_end fail closed in scanner + finalize/result integration; valid oversized lifecycle events still complete; duplicate semantic lifecycle keys (incl. escaped equivalents) fail closed and cannot balance open tools."
   },
-  "notes": "Complete JSON grammar authority + fail-closed duplicate semantic lifecycle keys: oversized trailing-comma agent_end and malformed tool_execution_end fail closed; duplicate toolCallId (incl. escaped equivalents) cannot balance open tools into clean completion; valid oversized lifecycle events still complete."
+  "notes": "Complete JSON grammar authority + fail-closed duplicate semantic lifecycle keys: oversized trailing-comma agent_end and malformed tool_execution_end fail closed; duplicate toolCallId (incl. escaped equivalents) cannot balance open tools into clean completion; valid oversized lifecycle events still complete. headSha=7ef86cf496ef4a39653e85f4248e945a4e819391",
+  "headSha": "7ef86cf496ef4a39653e85f4248e945a4e819391",
+  "mergeBase": "6a8765291961c94b28bf3651808de49a6722edc1",
+  "recordedAt": "2026-07-26T02:09:47.471173Z"
 }
