@@ -89,6 +89,12 @@ function installEarendilResolver() {
                     url: ${JSON.stringify(pathToFileURL(join(STUB_PKG_ROOT, '@earendil-works/pi-coding-agent/index.js')).href)},
                 };
             }
+            if (specifier === '@earendil-works/pi-tui' || specifier.startsWith('@earendil-works/pi-tui/')) {
+                return {
+                    shortCircuit: true,
+                    url: ${JSON.stringify(pathToFileURL(join(STUB_PKG_ROOT, '@earendil-works/pi-tui/index.js')).href)},
+                };
+            }
             return nextResolve(specifier, context);
         }
     `), import.meta.url);

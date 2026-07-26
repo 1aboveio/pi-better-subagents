@@ -460,10 +460,10 @@ describe('git-workspace', () => {
                 );
                 const origin = model.find((r) => r.name === 'origin');
                 const upstream = model.find((r) => r.name === 'upstream');
-                assert.equal(origin.url, fetchRemote);
-                assert.equal(origin.pushUrl, pushRemote);
-                assert.equal(upstream.url, otherRemote);
-                assert.equal(upstream.pushUrl, undefined, 'fetch-only remote must not invent a pushUrl');
+                assert.deepEqual(origin.urls, [fetchRemote]);
+                assert.deepEqual(origin.pushUrls, [pushRemote]);
+                assert.deepEqual(upstream.urls, [otherRemote]);
+                assert.deepEqual(upstream.pushUrls, [], 'fetch-only remote must not invent a pushUrl');
 
                 // resolveCloneUrl must prefer origin fetch URL even with spaces.
                 const info = inspectGitWorkspace(repo);
@@ -491,14 +491,14 @@ describe('git-workspace', () => {
                     pushRemote,
                     'clone pushurl must preserve whitespace path',
                 );
-                assert.equal(cloneOrigin.url, fetchRemote);
-                assert.equal(cloneOrigin.pushUrl, pushRemote);
+                assert.deepEqual(cloneOrigin.urls, [fetchRemote]);
+                assert.deepEqual(cloneOrigin.pushUrls, [pushRemote]);
                 assert.equal(
                     runGit(target, 'remote get-url upstream'),
                     otherRemote,
                     'additional fetch-only remote must be preserved',
                 );
-                assert.equal(cloneUpstream.pushUrl, undefined);
+                assert.deepEqual(cloneUpstream.pushUrls, []);
 
                 // Behavioral proof: push lands on the configured push remote.
                 runGit(target, 'checkout -b ws-proof');
@@ -613,9 +613,9 @@ describe('git-workspace', () => {
                 const model = readGitRemotes(repo);
                 const origin = model.find((remote) => remote.name === 'origin');
                 assert.ok(origin, 'origin remote must be present');
-                assert.equal(realpathSync(origin.url), realpathSync(fetchRemote));
-                assert.ok(origin.pushUrl, 'readGitRemotes must preserve pushUrl when distinct');
-                assert.equal(realpathSync(origin.pushUrl), realpathSync(pushRemote));
+                assert.deepEqual(origin.urls.map((url) => realpathSync(url)), [realpathSync(fetchRemote)]);
+                assert.ok(origin.pushUrls.length > 0, 'readGitRemotes must preserve pushUrl when distinct');
+                assert.deepEqual(origin.pushUrls.map((url) => realpathSync(url)), [realpathSync(pushRemote)]);
 
                 const target = join(base, 'clone');
                 prepareGitCloneWorkspace({ sourceDir: repo, targetDir: target });

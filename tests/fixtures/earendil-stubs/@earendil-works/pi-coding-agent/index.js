@@ -1,2 +1,8 @@
-/** Type-only package at runtime; export empty markers for import resolution. */
-export {};
+/** Minimal runtime stub for loading index.ts without the host pi install. */
+export class CustomEditor {
+    constructor(tui, theme, keybindings) {
+        this.tui = tui;
+        this.theme = theme;
+        this.keybindings = keybindings;
+    }
+}

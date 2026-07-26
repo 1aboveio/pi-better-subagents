@@ -23,6 +23,10 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
+import { readGitRemotes, syncGitRemotes, type GitRemote } from "./git-remotes.ts";
+
+export { readGitRemotes, syncGitRemotes, type GitRemote };
+
 export interface GitWorkspaceInfo {
     /** Absolute path to the working tree root. */
     repoRoot: string;
@@ -32,17 +36,6 @@ export interface GitWorkspaceInfo {
     commonGitDir: string;
     /** True when this working tree is a linked worktree (its `.git` is a file). */
     isLinkedWorktree: boolean;
-}
-
-export interface GitRemote {
-    name: string;
-    /** Fetch URL for the remote. */
-    url: string;
-    /**
-     * Push URL when it differs from the fetch URL (remote.<name>.pushurl).
-     * Undefined when fetch and push share the same URL.
-     */
-    pushUrl?: string;
 }
 
 function runGit(cwd: string, args: string[], opts?: { encoding?: BufferEncoding; stdio?: any }): string {
@@ -120,75 +113,6 @@ function readCurrentBranchOrCommit(dir: string): string {
 }
 
 /**
- * Read remote fetch/push URLs from structured Git config.
- *
- * Invariant (`git-remote-preservation`): disposable clone preparation must
- * preserve every source remote name and its configured fetch URL, plus any
- * distinct `remote.<name>.pushurl`, exactly — including local paths and other
- * URLs that contain whitespace. Values are read from null-delimited
- * `git config` output rather than `git remote -v` line parsing, which drops
- * any URL containing spaces and would cause `syncGitRemotes` to delete origin.
- */
-export function readGitRemotes(dir: string): GitRemote[] {
-    let raw: string;
-    try {
-        // --null emits key\nvalue\0 records so URL values may contain spaces,
-        // tabs, or other whitespace without being truncated or discarded.
-        // Call git directly (not runGit) so we do not .trim() away interior
-        // structure from null-delimited config output.
-        raw = execFileSync("git", ["config", "--null", "--get-regexp", "^remote\\..*\\.(url|pushurl)$"], {
-            cwd: dir,
-            encoding: "utf-8",
-            stdio: ["ignore", "pipe", "pipe"],
-        });
-    } catch {
-        // No remotes configured (git exits 1) or config unreadable.
-        return [];
-    }
-    if (!raw) return [];
-
-    const byName = new Map<string, { fetch?: string; push?: string }>();
-    for (const record of raw.split("\0")) {
-        if (!record) continue;
-        const nl = record.indexOf("\n");
-        if (nl < 0) continue;
-        const key = record.slice(0, nl);
-        const value = record.slice(nl + 1);
-        if (!value) continue;
-
-        // remote.<name>.url | remote.<name>.pushurl — name may itself contain dots.
-        const match = key.match(/^remote\.(.+)\.(url|pushurl)$/);
-        if (!match) continue;
-        const [, name, kind] = match;
-        const entry = byName.get(name) ?? {};
-        // First configured value wins (matches git remote get-url behavior).
-        if (kind === "url") {
-            if (entry.fetch === undefined) entry.fetch = value;
-        } else if (entry.push === undefined) {
-            entry.push = value;
-        }
-        byName.set(name, entry);
-    }
-
-    const remotes: GitRemote[] = [];
-    for (const [name, urls] of byName.entries()) {
-        // Prefer the fetch URL as the canonical remote URL; fall back to pushurl
-        // only when no fetch entry exists (unusual but legal).
-        const url = urls.fetch ?? urls.push;
-        if (!url) continue;
-        const remote: GitRemote = { name, url };
-        // Preserve a distinct push URL when Git config sets remote.<name>.pushurl.
-        if (urls.push && urls.push !== url) {
-            remote.pushUrl = urls.push;
-        }
-        remotes.push(remote);
-    }
-    // Stable order by remote name so tests and sync are deterministic.
-    remotes.sort((a, b) => a.name.localeCompare(b.name));
-    return remotes;
-}
-
-/**
  * Build the `git clone` argv for a disposable workspace.
  *
  * Exported so tests can assert the preferred AC5 shape without re-deriving it:
@@ -218,51 +142,10 @@ export function buildGitCloneArgs(options: {
 export function resolveCloneUrl(sourceDir: string, info: GitWorkspaceInfo): string {
     const remotes = readGitRemotes(sourceDir);
     const origin = remotes.find((remote) => remote.name === "origin");
-    if (origin?.url) return origin.url;
+    if (origin?.urls[0]) return origin.urls[0];
     // Any configured remote is still better than rewriting origin to the parent tree.
-    if (remotes[0]?.url) return remotes[0].url;
+    if (remotes[0]?.urls[0]) return remotes[0].urls[0];
     return info.repoRoot;
-}
-
-/** Make the clone's remotes match the source repository's fetch and push URLs. */
-function syncGitRemotes(sourceDir: string, targetDir: string): void {
-    const sourceRemotes = readGitRemotes(sourceDir);
-    const targetRemotes = readGitRemotes(targetDir);
-    const sourceNames = new Set(sourceRemotes.map((remote) => remote.name));
-
-    // Drop remotes the source does not have (typical case: clone-from-path set
-    // origin to the parent working tree).
-    for (const remote of targetRemotes) {
-        if (!sourceNames.has(remote.name)) {
-            runGit(targetDir, ["remote", "remove", remote.name]);
-        }
-    }
-
-    for (const remote of sourceRemotes) {
-        const existing = targetRemotes.find((entry) => entry.name === remote.name);
-        if (!existing) {
-            runGit(targetDir, ["remote", "add", remote.name, remote.url]);
-        } else if (existing.url !== remote.url) {
-            runGit(targetDir, ["remote", "set-url", remote.name, remote.url]);
-        }
-
-        // Preserve a distinct push URL (remote.<name>.pushurl). Clear any stale
-        // pushurl on the clone when the source uses a single URL for both.
-        if (remote.pushUrl) {
-            if (existing?.pushUrl !== remote.pushUrl) {
-                runGit(targetDir, ["remote", "set-url", "--push", remote.name, remote.pushUrl]);
-            }
-        } else if (existing?.pushUrl) {
-            // Source has no distinct push URL; drop a leftover clone pushurl so
-            // push falls back to the fetch URL.
-            try {
-                runGit(targetDir, ["remote", "set-url", "--push", "--delete", remote.name, existing.pushUrl]);
-            } catch {
-                // Older Git may not support --delete; fall back to matching fetch.
-                runGit(targetDir, ["remote", "set-url", "--push", remote.name, remote.url]);
-            }
-        }
-    }
 }
 
 /**
