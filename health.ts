@@ -192,15 +192,22 @@ export function reconcileRun(meta: ReconcileInput, probe: ProcessProbe, now: num
 }
 
 /**
- * True while any current-parent run is `running` or `orphaned` — the only
- * states periodic reconciliation monitors. The scheduler stops when false.
+ * True while any current-parent run still needs the health ticker:
+ * - `running` / `orphaned` for process-group reconciliation (#63), or
+ * - `lost` without a successful health-callback handoff marker, so durable
+ *   coordinator recovery can still fire after reload (#65).
+ * The scheduler stops when false.
  */
 export function needsMonitoring(
-    metas: ReadonlyArray<Pick<RunMeta, "spawnPid" | "status">>,
+    metas: ReadonlyArray<Pick<RunMeta, "spawnPid" | "status" | "lostCallbackSentAt">>,
     parentPid: number = process.pid,
 ): boolean {
     return metas.some(
-        (m) => ownedByThisParent(m, parentPid) && (m.status === "running" || m.status === "orphaned"),
+        (m) => ownedByThisParent(m, parentPid) && (
+            m.status === "running"
+            || m.status === "orphaned"
+            || (m.status === "lost" && m.lostCallbackSentAt === undefined)
+        ),
     );
 }
 
