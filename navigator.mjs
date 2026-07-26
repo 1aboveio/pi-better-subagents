@@ -227,7 +227,9 @@ export function buildNavigatorLines(state, opts = {}) {
         if (r.spend) parts.push(r.spend);
         lines.push(prefix + parts.join(" · "));
     }
-    lines.push("↑↓ select · enter open · x close · esc close");
+    const selected = rows.length > 0 ? rows[state.selected] : null;
+    const action = selected?.status === "running" ? "x stop" : (selected ? "x dismiss" : null);
+    lines.push(["↑↓ select", "enter open", action, "esc close"].filter(Boolean).join(" · "));
     return lines.map((l) => truncate(l, width));
 }
 
@@ -301,7 +303,8 @@ export function buildDetailLines(detail, opts = {}) {
     for (const raw of body.split(/\r?\n/)) {
         lines.push(raw.length ? raw : " ");
     }
-    lines.push("← back · x close · esc close");
+    const action = detail.status === "running" ? "x stop" : "x dismiss";
+    lines.push(`← back · ${action} · esc close`);
     return lines.map((l) => truncate(l, width));
 }
 
@@ -561,6 +564,14 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
         return data === "x" || data === "X";
     }
 
+    if (deps.initialDetailId != null) {
+        const idx = (state.rows ?? []).findIndex((r) => r && r.id === deps.initialDetailId);
+        if (idx >= 0) {
+            state.selected = idx;
+            enterDetail();
+        }
+    }
+
     return {
         render(width) {
             if (mode === "detail") {
@@ -715,7 +726,7 @@ export function disposeTrackedNavigator(disposeSlot) {
 
 /**
  * Wrap any editor component so bare ← on an EMPTY editor (with visible runs)
- * opens the navigator, and everything else delegates unchanged.
+ * enters subagent navigation, and everything else delegates unchanged.
  *
  * Composition, not replacement: a delegating Proxy forwards every property get
  * (methods bound to the inner editor) and every set to the wrapped component,
@@ -728,16 +739,37 @@ export function disposeTrackedNavigator(disposeSlot) {
  * @param {object} deps
  * @param {(data: string) => boolean} deps.isOpenTrigger - bare ← match (pi-tui matchesKey(data, Key.left))
  * @param {() => boolean} deps.canOpen - visible current-parent runs exist
- * @param {() => void} deps.onOpen - open the navigator overlay
+ * @param {() => boolean} [deps.isNavigating] - true while main-window navigation owns empty-editor keys
+ * @param {(data: string) => boolean} [deps.isReturnTrigger] - Down returns to the input line while navigating
+ * @param {(data: string) => boolean} [deps.isPreviousTrigger] - Up moves to the previous main-window row while navigating
+ * @param {(data: string) => boolean} [deps.isViewTrigger] - Enter opens selected detail while navigating
+ * @param {(data: string) => boolean} [deps.isStopTrigger] - x stops selected run while navigating
+ * @param {() => void} [deps.onReturn]
+ * @param {() => void} [deps.onPrevious]
+ * @param {() => void} [deps.onView]
+ * @param {() => void} [deps.onStop]
+ * @param {() => void} [deps.onCancel]
+ * @param {() => void} deps.onOpen - enter main-window navigation
  */
 export function wrapEditor(inner, deps) {
     return new Proxy(inner, {
         get(target, prop) {
             if (prop === "handleInput") {
                 return (data) => {
-                    if (deps.isOpenTrigger(data) && target.getText() === "" && deps.canOpen()) {
-                        deps.onOpen();
-                        return;
+                    if (target.getText() === "") {
+                        if (typeof deps.isNavigating === "function" && deps.isNavigating()) {
+                            if (deps.isReturnTrigger?.(data)) { deps.onReturn?.(); return; }
+                            if (deps.isPreviousTrigger?.(data)) { deps.onPrevious?.(); return; }
+                            if (deps.isViewTrigger?.(data)) { deps.onView?.(); return; }
+                            if (deps.isStopTrigger?.(data)) { deps.onStop?.(); return; }
+                            deps.onCancel?.();
+                            target.handleInput(data);
+                            return;
+                        }
+                        if (deps.isOpenTrigger(data) && deps.canOpen()) {
+                            deps.onOpen();
+                            return;
+                        }
                     }
                     target.handleInput(data);
                 };

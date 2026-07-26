@@ -149,13 +149,13 @@ async function waitFor(pred, timeoutMs = 3000) {
 }
 
 /**
- * Boot the real extension factory, fire session_start on a TUI ctx, drive the
- * empty-editor ← open path, then return handles for pressing keys on the live
- * overlay component captured from ui.custom().
+ * Boot the real extension factory, fire session_start on a TUI ctx, and drive
+ * the empty-editor main-window subagent navigation path.
  */
 function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
     const handlers = {};
     const statusCalls = [];
+    const widgetCalls = [];
     const closedOutcomes = [];
     let overlayComponent;
     let editor;
@@ -163,8 +163,9 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
     const overlayReady = new Promise((r) => { resolveOverlay = r; });
 
     const ui = {
+        theme: { fg: (color, s) => `<${color}>${s}</>` },
         setStatus(k, v) { statusCalls.push([k, v]); },
-        setWidget() {},
+        setWidget(k, v) { widgetCalls.push([k, v]); },
         notify() {},
         factory: undefined,
         getEditorComponent() { return this.factory; },
@@ -206,21 +207,31 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
             assert.equal(typeof editor.handleInput, "function");
             assert.equal(editor.getText(), "");
         },
-        async openViaLeftKey() {
+        focusViaLeftKey() {
             editor.handleInput("left");
+        },
+        async openDetailViaEnter() {
+            editor.handleInput("enter");
             const component = await Promise.race([
                 overlayReady,
                 new Promise((_, rej) => setTimeout(() => rej(new Error("overlay did not open")), 1000)),
             ]);
-            assert.ok(component, "left on empty editor must open navigator overlay");
+            assert.ok(component, "enter on focused widget row must open navigator detail overlay");
             assert.equal(typeof component.handleInput, "function");
             return component;
         },
-        pressX() {
-            assert.ok(overlayComponent, "overlay must be open before pressing x");
-            overlayComponent.handleInput("x");
+        pressEditor(key) {
+            editor.handleInput(key);
         },
+        lastWidget(key) {
+            for (let i = widgetCalls.length - 1; i >= 0; i--) {
+                if (widgetCalls[i][0] === key) return widgetCalls[i][1];
+            }
+            return Symbol.for("missing");
+        },
+        pressX() { editor.handleInput("x"); },
         statusCalls,
+        widgetCalls,
         closedOutcomes,
         ui,
         ctx,
@@ -237,7 +248,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
     };
 }
 
-describe("registered extension path: navigator close second-x", () => {
+describe("registered extension path: main-window navigator actions", () => {
     let mod;
     let registry;
     let processExists;
@@ -287,7 +298,7 @@ describe("registered extension path: navigator close second-x", () => {
 
     // @covers navigator.close
     // @level integration
-    it("terminal run: registered TUI path second x dismisses and preserves terminal status", async () => {
+    it("registered TUI path left focuses widget list and enter opens selected running detail", async () => {
         const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
         const affordancePid = spawnSleeper();
         const affordanceId = nav.seedRun({
@@ -307,29 +318,19 @@ describe("registered extension path: navigator close second-x", () => {
 
         try {
             await nav.start();
-            await nav.openViaLeftKey();
+            nav.focusViaLeftKey();
+            const focused = nav.lastWidget("subagents");
+            assert.ok(Array.isArray(focused), "left focuses the main widget list, not the overlay");
+            assert.ok(focused[0].includes("<muted>Enter to view · x to stop</>"), "focused widget shows main-list actions");
+            assert.ok(focused.some((line) => String(line).startsWith("› ") && String(line).includes("live-affordance")), "running row is selected");
 
-            // First x arms only — no dismiss yet.
-            nav.pressX();
-            let back = registry.readMeta(id);
-            assert.equal(back.status, "completed");
-            assert.equal(back.dismissedAt, undefined, "first x must not dismiss");
-            assert.ok(
-                nav.statusCalls.some((c) => c[0] === "subagents-close" && String(c[1] ?? "").includes("dismiss")),
-                "first x should publish a close-confirm hint on subagents-close",
-            );
-
-            // Second x acts through navigatorCloseRun → executeNavigatorClose with real stopRun.
-            nav.pressX();
-            back = registry.readMeta(id);
+            const component = await nav.openDetailViaEnter();
+            const text = component.render(80).join("\n").replace(/<\/?[a-z]*>/g, "");
+            assert.ok(text.includes("live-affordance"), text);
+            assert.equal(processExists(affordancePid), true, "enter must not stop the selected run");
+            const back = registry.readMeta(id);
             assert.equal(back.status, "completed", "terminal status preserved");
-            assert.equal(typeof back.dismissedAt, "number", "second x must set dismissedAt");
-            assert.equal(back.endedAt, 99, "endedAt unchanged");
-            assert.equal(processExists(affordancePid), true, "affordance run must not be selected or stopped");
-            assert.ok(
-                !registry.navigatorVisibleRuns(registry.listMetas(), THIS_PID).some((m) => m.id === id),
-                "dismissed terminal run leaves navigator visibility",
-            );
+            assert.equal(back.dismissedAt, undefined, "terminal row is not dismissed by main running-list navigation");
         } finally {
             registry.dismissRun(affordanceId);
             try { process.kill(-affordancePid, "SIGTERM"); } catch { try { process.kill(affordancePid, "SIGTERM"); } catch { /* ignore */ } }
@@ -338,7 +339,7 @@ describe("registered extension path: navigator close second-x", () => {
 
     // @covers navigator.close
     // @level integration
-    it("running run: registered TUI path second x stops via shared stopRun and dismisses", async () => {
+    it("running run: registered TUI main-list x stops via shared stopRun and dismisses", async () => {
         const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
         const pid = spawnSleeper();
         const id = nav.seedRun({
@@ -349,18 +350,12 @@ describe("registered extension path: navigator close second-x", () => {
         });
 
         await nav.start();
-        await nav.openViaLeftKey();
+        nav.focusViaLeftKey();
 
         nav.pressX();
         let back = registry.readMeta(id);
-        assert.equal(back.status, "running", "first x must not stop");
-        assert.equal(back.dismissedAt, undefined);
-        assert.equal(processExists(pid), true, "process still alive after arm");
-
-        nav.pressX();
-        back = registry.readMeta(id);
-        assert.equal(back.status, "killed", "second x must mark killed via shared stopRun");
-        assert.equal(typeof back.dismissedAt, "number", "second x must dismiss");
+        assert.equal(back.status, "killed", "main-list x must mark killed via shared stopRun");
+        assert.equal(typeof back.dismissedAt, "number", "main-list x must dismiss");
         assert.equal(
             await waitFor(() => !processExists(pid)),
             true,
