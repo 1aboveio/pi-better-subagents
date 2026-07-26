@@ -1,0 +1,1 @@
+fix health-callback-exactly-once: mark only after successful handoff; recover persisted unmarked orphaned/lost after reload independently of fresh transitions; keep ticker alive for unmarked lost; add registered session_start recovery tests
