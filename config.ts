@@ -36,6 +36,15 @@ export interface SubagentConfig {
      * mid-turn exit-0 drain if any installed package breaks process lifetime.
      */
     inheritExtensions?: boolean | null;
+    /**
+     * Optional health-observation thresholds (issue #66). Milliseconds.
+     * Override the defaults used by `resolveHealthThresholds` /
+     * `loadHealthThresholdsFromConfig` without expanding the spawn tool API.
+     */
+    healthQuietMs?: number | null;
+    healthStaleMs?: number | null;
+    healthLongToolMs?: number | null;
+    healthLongCompactionMs?: number | null;
 }
 
 /** Concurrency cap when config.json sets none. */
