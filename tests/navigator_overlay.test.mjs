@@ -652,6 +652,19 @@ describe("navigator overlay component", () => {
         assert.ok(plain[2].startsWith("  "));
         assert.ok(plain[2].includes("sa_2 · completed · ? · 1m 01s · 1.2k tok"), "unnamed run shows its id and spend");
         assert.ok(plain[3].includes("esc"), "help line advertises escape");
+        assert.ok(plain[3].includes("x stop"), "running selection labels x as stop, not close");
+        assert.ok(!plain[3].includes("x close"), "x action must not collide with esc close wording");
+    });
+
+    // @covers navigator.overlay
+    // @level unit
+    it("list help labels terminal x action as dismiss", () => {
+        const state = createNavigatorState([
+            { id: "sa_done", status: "completed", model: "?", elapsed: "1s", spend: "" },
+        ]);
+        const lines = buildNavigatorLines(state, { width: 80 }).map((l) => l.replace(/<\/?[a-z]*>/g, ""));
+        assert.ok(lines.at(-1).includes("x dismiss"), lines.at(-1));
+        assert.ok(lines.at(-1).includes("esc close"), lines.at(-1));
     });
 
     // @covers navigator.overlay

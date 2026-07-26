@@ -190,6 +190,37 @@ describe("widget liveness (spinner)", () => {
         assert.equal(lines[0], "Subagents · 2 running");
         assert.equal(lines.length, 3);
     });
+
+    // @covers widget.render
+    // @level unit
+    it("left-arrow navigate hint stays on the title row", () => {
+        const lines = buildWidgetLines({
+            running: [{ id: "a", name: "one", startedAt: 0 }],
+            frame: 0,
+            now: 1000,
+            spendById: {},
+            affordanceHint: "← to navigate",
+        });
+        assert.equal(lines[0], "Subagents · 1 running  ← to navigate");
+        assert.equal(lines.length, 2, "hint must not consume a separate widget row");
+    });
+
+    // @covers widget.render
+    // @level unit
+    it("selected main-window row uses the navigation marker", () => {
+        const lines = buildWidgetLines({
+            running: [
+                { id: "a", name: "one", startedAt: 0 },
+                { id: "b", name: "two", startedAt: 0 },
+            ],
+            frame: 0,
+            now: 1000,
+            spendById: {},
+            selectedId: "b",
+        });
+        assert.ok(lines[1].startsWith("  "), lines[1]);
+        assert.ok(lines[2].startsWith("› "), lines[2]);
+    });
 });
 
 // ---------------------------------------------------------------------------

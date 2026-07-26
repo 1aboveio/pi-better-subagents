@@ -141,6 +141,8 @@ export function nextWidgetAction(prevLines, nextLines) {
  * @param {number} p.now - Date.now()
  * @param {Record<string, { usage?: object, tool?: string|null }>} [p.spendById]
  * @param {Record<string, object>|undefined} [p.healthById] - optional #66 observations
+ * @param {string|null} [p.affordanceHint] - left-arrow affordance shown on the title line
+ * @param {string|null} [p.selectedId] - selected run id while the main-window list is focused
  * @returns {string[]}
  */
 export function buildWidgetLines(p) {
@@ -149,8 +151,10 @@ export function buildWidgetLines(p) {
     const now = p.now ?? Date.now();
     const spendById = p.spendById ?? {};
     const healthById = p.healthById ?? {};
+    const selectedId = p.selectedId ?? null;
     const spin = SPINNER[((frame % SPINNER.length) + SPINNER.length) % SPINNER.length];
-    const lines = [`Subagents · ${running.length} running`];
+    const hint = p.affordanceHint ? `  ${p.affordanceHint}` : "";
+    const lines = [`Subagents · ${running.length} running${hint}`];
     for (const m of running) {
         const el = fmtElapsedFixed(now - m.startedAt);
         const snap = spendById[m.id] ?? {};
@@ -158,9 +162,10 @@ export function buildWidgetLines(p) {
         const tool = snap.tool ? ` · ${snap.tool}` : "";
         const health = formatWidgetHealthSuffix(healthById[m.id]);
         const nm = m.name ?? m.id;
+        const prefix = selectedId === m.id ? "› " : "  ";
         // Preserve list-show-model (#14): "name · shortModel" before fixed elapsed.
         // Two spaces before elapsed keep a stable gap; elapsed itself is fixed-width.
-        lines.push(`  ${spin} ${nm} · ${shortModel(m.model)}  ${el}${tool}${spend ? `  ${spend}` : ""}${health}`);
+        lines.push(`${prefix}${spin} ${nm} · ${shortModel(m.model)}  ${el}${tool}${spend ? `  ${spend}` : ""}${health}`);
     }
     return lines;
 }

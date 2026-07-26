@@ -132,6 +132,8 @@ let ticker: ReturnType<typeof setInterval> | undefined;
 let frame = 0;
 /** Last lines successfully sent to setWidget (undefined ⇒ cleared / never set). */
 let lastWidgetLines: string[] | undefined;
+let widgetNavActive = false;
+let widgetNavSelectedId: string | undefined;
 
 type SpendSnap = {
     usage: Usage;
@@ -234,6 +236,19 @@ function observeWidgetHealth(meta: RunMeta, now: number): HealthObservation | un
     }
 }
 
+function syncWidgetNavSelection(running: RunMeta[]): void {
+    if (!widgetNavActive) return;
+    if (running.length === 0) {
+        widgetNavActive = false;
+        widgetNavSelectedId = undefined;
+        return;
+    }
+    if (!widgetNavSelectedId || !running.some((m) => m.id === widgetNavSelectedId)) {
+        // Start on the row nearest the input line; Down returns to input.
+        widgetNavSelectedId = running[running.length - 1]?.id;
+    }
+}
+
 /**
  * Redraw the running-subagents widget above the editor; clear it when idle.
  * Includes current-parent `running` and non-terminal `orphaned` rows so degraded
@@ -252,6 +267,7 @@ function renderWidget(): void {
         const st = effectiveStatus(m);
         return st === "running" || st === "orphaned";
     });
+    syncWidgetNavSelection(running);
     if (running.length === 0) {
         applyWidget(WIDGET_CLEAR);
         // Drop spend/health entries for runs that are no longer live so a restart
@@ -278,13 +294,23 @@ function renderWidget(): void {
         const obs = observeWidgetHealth(m, now);
         if (obs) healthById[m.id] = obs;
     }
+    const widgetHintText = widgetNavActive ? "Enter to view · x to stop" : "← to navigate";
+    const widgetHint = ctx.ui.theme?.fg
+        ? ctx.ui.theme.fg("muted", widgetHintText)
+        : widgetHintText;
     // buildWidgetLines includes shortModel(m.model) — preserves #14 list-show-model.
     // healthById is silent for healthy/quiet; degraded appends a short suffix (#67).
-    const lines = buildWidgetLines({ running, frame, now, spendById, healthById });
-    // Running-only footer hint count stays on navigatorRunningCount (#120);
-    // widget may still paint orphaned health rows above.
-    const hint = navigatorFooterHint(navigatorRunningCount());
-    if (hint) lines.push(hint);
+    // Keep the left-arrow affordance on the title line so the widget does not
+    // grow a separate hint row under the active runs.
+    const lines = buildWidgetLines({
+        running,
+        frame,
+        now,
+        spendById,
+        healthById,
+        affordanceHint: widgetHint,
+        selectedId: widgetNavActive ? widgetNavSelectedId : undefined,
+    });
     applyWidget(lines);
 }
 
@@ -507,8 +533,66 @@ function publishCloseConfirmHint(ctx: ExtensionContext, hint: string | null): vo
     } catch { /* ignore */ }
 }
 
+function selectedWidgetNavRun(): RunMeta | undefined {
+    const running = navigatorRunningRuns();
+    syncWidgetNavSelection(running);
+    return running.find((m) => m.id === widgetNavSelectedId);
+}
+
+function enterWidgetNav(ctx: ExtensionContext): void {
+    if (!isNavigatorUiAvailable(ctx)) return;
+    const running = navigatorRunningRuns();
+    if (running.length === 0) return;
+    widgetNavActive = true;
+    widgetNavSelectedId = running[running.length - 1]?.id;
+    try { renderWidget(); } catch { /* ignore */ }
+}
+
+function exitWidgetNav(): void {
+    if (!widgetNavActive) return;
+    widgetNavActive = false;
+    widgetNavSelectedId = undefined;
+    try { renderWidget(); } catch { /* ignore */ }
+}
+
+function moveWidgetNavPrevious(): void {
+    const running = navigatorRunningRuns();
+    syncWidgetNavSelection(running);
+    const idx = running.findIndex((m) => m.id === widgetNavSelectedId);
+    if (idx > 0) widgetNavSelectedId = running[idx - 1]?.id;
+    try { renderWidget(); } catch { /* ignore */ }
+}
+
+function returnWidgetNavToInput(): void {
+    const running = navigatorRunningRuns();
+    syncWidgetNavSelection(running);
+    const idx = running.findIndex((m) => m.id === widgetNavSelectedId);
+    if (idx >= 0 && idx < running.length - 1) {
+        widgetNavSelectedId = running[idx + 1]?.id;
+        try { renderWidget(); } catch { /* ignore */ }
+        return;
+    }
+    exitWidgetNav();
+}
+
+function viewWidgetNavSelection(ctx: ExtensionContext): void {
+    const selected = selectedWidgetNavRun();
+    if (!selected) return;
+    exitWidgetNav();
+    openNavigator(ctx, selected.id);
+}
+
+function stopWidgetNavSelection(ctx: ExtensionContext): void {
+    const selected = selectedWidgetNavRun();
+    if (!selected) return;
+    try { navigatorCloseRun(selected.id); } catch { /* ignore */ }
+    lastNavigatorHint = undefined;
+    updateNavigatorFooter(ctx);
+    try { renderWidget(); } catch { /* ignore */ }
+}
+
 /** Open the focused navigator overlay. No-op without a UI or visible runs. */
-function openNavigator(ctx: ExtensionContext): void {
+function openNavigator(ctx: ExtensionContext, initialDetailId?: string): void {
     if (!isNavigatorUiAvailable(ctx)) return;
     const rows = navigatorRows();
     if (rows.length === 0) return;
@@ -521,6 +605,7 @@ function openNavigator(ctx: ExtensionContext): void {
             truncate: truncateToWidth,
             getDetail: (id: string) => navigatorDetail(id),
             getRows: () => navigatorRows(),
+            initialDetailId,
             closeRun: (id: string) => navigatorCloseRun(id),
             onCloseConfirmHint: (hint: string | null) => publishCloseConfirmHint(ctx, hint),
             onClosed: () => {
@@ -554,7 +639,17 @@ function installNavigator(ctx: ExtensionContext): void {
                 new CustomEditor(tui, theme, keybindings),
             isOpenTrigger: (data: string) => matchesKey(data, Key.left),
             canOpen: () => navigatorRunningCount() > 0,
-            onOpen: () => openNavigator(ctx),
+            isNavigating: () => widgetNavActive,
+            isReturnTrigger: (data: string) => matchesKey(data, "down"),
+            isPreviousTrigger: (data: string) => matchesKey(data, "up"),
+            isViewTrigger: (data: string) => matchesKey(data, "enter"),
+            isStopTrigger: (data: string) => data === "x" || data === "X",
+            onOpen: () => enterWidgetNav(ctx),
+            onReturn: () => returnWidgetNavToInput(),
+            onPrevious: () => moveWidgetNavPrevious(),
+            onView: () => viewWidgetNavSelection(ctx),
+            onStop: () => stopWidgetNavSelection(ctx),
+            onCancel: () => exitWidgetNav(),
         });
     } catch { /* ignore */ }
 }
