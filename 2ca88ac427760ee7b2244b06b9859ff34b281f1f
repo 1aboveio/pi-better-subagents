@@ -1,0 +1,1 @@
+fix(P1): surfaceableCompactFacts drops only ordinary running-tool duration facts (`name` / `name 10s`), not every `${toolName} ` prefix — preserves colliding degraded labels like `model error` / `model retrying` when a short-running tool is named `model`. Collision regression in health_surfacing.test.mjs.
