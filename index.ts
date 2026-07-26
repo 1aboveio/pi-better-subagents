@@ -181,9 +181,11 @@ function applyWidget(linesOrClear: string[] | typeof WIDGET_CLEAR): void {
 function renderWidget(): void {
     const ctx = uiCtx;
     if (!ctx || !ctx.hasUI) return;
+    const visibleCount = isNavigatorUiAvailable(ctx) ? navigatorVisibleCount(listMetas()) : 0;
     const running = listMetas().filter((m) => ownedByThisParent(m) && effectiveStatus(m) === "running");
     if (running.length === 0) {
-        applyWidget(WIDGET_CLEAR);
+        const hint = navigatorFooterHint(visibleCount);
+        applyWidget(hint ? [hint] : WIDGET_CLEAR);
         // Drop spend entries for runs that are no longer live so a restart
         // does not show stale totals for a recycled id.
         spendCache.clear();
@@ -832,7 +834,10 @@ export default function (pi: ExtensionAPI) {
         // - Reinstall the editor wrapper without stacking (marked factory).
         // - Clear + republish footer statuses (pi clears extension statuses on
         //   session switch/reload; dirty-check only dedupes within a session).
+        // - Repaint the widget even if its last in-memory lines match; the host
+        //   may have dropped extension UI during reload/session replacement.
         disposeTrackedNavigator(navigatorDisposeSlot);
+        lastWidgetLines = undefined;
         if (isNavigatorUiAvailable(ctx)) {
             try { ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, undefined); } catch { /* ignore */ }
         }
