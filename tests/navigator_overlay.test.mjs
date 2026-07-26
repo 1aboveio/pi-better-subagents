@@ -2,10 +2,10 @@
  * Unit tests for issue #45 — minimal subagent navigator from empty-editor Left.
  *
  * Pins:
- * - Footer hint: `← subagents · N` while ≥1 visible current-parent run exists,
- *   cleared when none, delivered via the default footer status mechanism
+ * - Footer hint: `← subagents · N` while ≥1 non-dismissed current-parent run
+ *   is running, cleared when none, delivered via the default footer status mechanism
  *   (setStatus) — the full footer is never replaced (no setFooter anywhere).
- * - Editor interception: bare `←` on an EMPTY editor with visible runs opens
+ * - Editor interception: bare `←` on an EMPTY editor with running runs opens
  *   the navigator; `←` with text delegates to normal cursor-left; any other
  *   key delegates. The wrapper composes with any existing editor component and
  *   repeated installs never stack duplicate wrappers.
@@ -124,7 +124,7 @@ describe("navigator footer hint", () => {
     // @covers navigator.footer-hint
     // @covers navigator.overlay
     // @level unit
-    it("hint count and overlay list share the #44 visibility seam (dismissed + foreign excluded)", () => {
+    it("overlay list uses the #44 visibility seam (dismissed + foreign excluded)", () => {
         const ownId = trackDisk(`sa_t45_vis_${Date.now()}`);
         const termId = trackDisk(`sa_t45_vist_${Date.now()}`);
         const dismissedId = trackDisk(`sa_t45_visd_${Date.now()}`);
@@ -138,6 +138,16 @@ describe("navigator footer hint", () => {
         const ids = visible.map((m) => m.id);
         assert.ok(ids.includes(ownId) && ids.includes(termId), "running AND terminal runs are visible");
         assert.ok(!ids.includes(dismissedId), "dismissed runs are excluded from the count/list");
+    });
+
+    // @covers navigator.footer-hint
+    // @covers navigator.editor-wrapper
+    // @level unit
+    it("extension wiring bases the left-arrow affordance on running runs", () => {
+        const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+        assert.ok(src.includes("function navigatorRunningCount"), "index.ts must expose a running-only affordance seam");
+        assert.ok(src.includes("canOpen: () => navigatorRunningCount() > 0"), "empty-editor left must require a running run");
+        assert.ok(src.includes("navigatorFooterHint(navigatorRunningCount())"), "footer hint must count running runs only");
     });
 
     // @covers navigator.footer-hint
