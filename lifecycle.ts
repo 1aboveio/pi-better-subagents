@@ -253,6 +253,47 @@ export function formatIncompleteResult(
     ].join("\n");
 }
 
+/** Best-effort parsed body shared by incomplete / orphaned / lost diagnostics. */
+function bestParsedOutput(run: ParsedRun): string {
+    return run.finalText || run.lastActivity || "(no parsed assistant output)";
+}
+
+/**
+ * Non-final diagnostic for an orphaned run (#65).
+ * Supervision is broken; related process-group work may still be alive.
+ * Surfaces best-CURRENT artifacts without pretending the run finished.
+ */
+export function formatOrphanedResult(run: ParsedRun, rawLogTail: string): string {
+    return [
+        "Run is orphaned — non-final. Supervision was lost; related processes may still be alive.",
+        "There is no final result yet. Best-current artifacts below (output may still change).",
+        "",
+        "--- best-current parsed output ---",
+        bestParsedOutput(run),
+        "",
+        "--- raw log tail ---",
+        rawLogTail,
+    ].join("\n");
+}
+
+/**
+ * Terminal-unknown diagnostic for a lost run (#65).
+ * No related process remains and no coherent terminal completion was observed.
+ * Surfaces best-AVAILABLE artifacts without claiming normal completion/failure.
+ */
+export function formatLostResult(run: ParsedRun, rawLogTail: string): string {
+    return [
+        "Run is lost: no related process remains and no coherent terminal completion was observed.",
+        "This is a terminal unknown outcome, not a normal failure. Best-available artifacts below.",
+        "",
+        "--- best-available parsed output ---",
+        bestParsedOutput(run),
+        "",
+        "--- raw log tail ---",
+        rawLogTail,
+    ].join("\n");
+}
+
 export interface FormatSubagentResultInput {
     id: string;
     status: string;
@@ -267,6 +308,8 @@ export interface FormatSubagentResultInput {
 /**
  * Format `subagent_result` body. Incomplete classifications never present
  * progress text as a clean final answer; all paths include lifecycle diagnostics.
+ * Lost runs use the dedicated #65 diagnostic so best-available artifacts stay
+ * consistent with the registered tool path.
  */
 export function formatSubagentResult(input: FormatSubagentResultInput): string {
     const { id, status, exitCode, statSeg, toolsSeg, run, rawLogTail, lifecycle } = input;
@@ -274,18 +317,16 @@ export function formatSubagentResult(input: FormatSubagentResultInput): string {
     if (lifecycle.incomplete) {
         return `${head}\n${formatIncompleteResult(run, rawLogTail, lifecycle)}`;
     }
-    // Terminal lost: no coherent exit evidence; surface best-available artifacts
-    // without presenting them as a clean final answer.
-    const lostBanner = status === "lost" || lifecycle.classification === "lost"
-        ? "Run is lost: no related process remains and no coherent terminal result was observed. Best-available artifacts below."
-        : null;
+    // Terminal lost: dedicated diagnostic + best-available artifacts (#65).
+    if (status === "lost" || lifecycle.classification === "lost") {
+        return `${head}\n${formatLostResult(run, rawLogTail)}`;
+    }
     const body = run.finalText
         || (run.lastActivity
             ? `(no final answer parsed; latest activity)\n${run.lastActivity}`
             : `(no final answer parsed)\n\n--- raw log tail ---\n${rawLogTail}`);
     return [
         head,
-        ...(lostBanner ? [lostBanner] : []),
         formatLifecycleDiagnostics(lifecycle),
         body,
     ].join("\n");

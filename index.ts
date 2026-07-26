@@ -38,15 +38,22 @@ import {
     effectiveStatus,
     ownedByThisParent,
     navigatorVisibleRuns,
+    isDismissed,
     dismissRun,
     type RunMeta,
 } from "./registry.ts";
 import {
     captureProcessIdentity,
+    extractChildEventFactsFromLog,
+    loadHealthThresholdsFromConfig,
     needsMonitoring,
+    observeRunHealth,
     realProcessProbe,
     reconcileRun,
+    type ChildEventFacts,
+    type HealthObservation,
     type ProcessProbe,
+    type RawLogDiagnostic,
 } from "./health.ts";
 import {
     assignBatchJobNames,
@@ -60,6 +67,7 @@ import {
     formatCapacityRejectMessage,
     getSharedCapacityGate,
 } from "./capacity.mjs";
+import { buildHealthCallbackDelivery } from "./completion.ts";
 import {
     text,
     subagentListTool,
@@ -78,6 +86,7 @@ import {
     buildWidgetLines,
     nextWidgetAction,
     isSpendCacheFresh,
+    resolveHealthLogExtraction,
 } from "./widget.ts";
 import {
     NAVIGATOR_STATUS_KEY,
@@ -133,12 +142,26 @@ type SpendSnap = {
 /** Per-run spend/tool cache for the UI hot path. */
 const spendCache = new Map<string, SpendSnap>();
 
-function logSizeOf(id: string): number {
+type HealthLogSnap = {
+    facts: ChildEventFacts;
+    rawLog: RawLogDiagnostic;
+    logSize: number;
+    mtimeMs?: number;
+};
+/** Per-run health-log parse cache — size/mtime gated (no full reparse every tick). */
+const healthLogCache = new Map<string, HealthLogSnap>();
+
+function logStatOf(id: string): { size: number; mtimeMs?: number } {
     try {
-        return statSync(logPathFor(id)).size;
+        const st = statSync(logPathFor(id));
+        return { size: st.size, mtimeMs: Math.trunc(st.mtimeMs) };
     } catch {
-        return 0;
+        return { size: 0 };
     }
+}
+
+function logSizeOf(id: string): number {
+    return logStatOf(id).size;
 }
 
 /** Refresh spend/tool for a run only when the cache is stale or the log grew. */
@@ -176,17 +199,65 @@ function applyWidget(linesOrClear: string[] | typeof WIDGET_CLEAR): void {
     lastWidgetLines = action.lines;
 }
 
-/** Redraw the running-subagents widget above the editor; clear it when idle. */
+/**
+ * Observe health for a widget row. Best-effort; never throws into the tick.
+ * Full log parse is gated by size/mtime so the 1 Hz frame does not re-read and
+ * reparse every complete log when nothing changed (#67).
+ */
+function observeWidgetHealth(meta: RunMeta, now: number): HealthObservation | undefined {
+    try {
+        const { size: logSize, mtimeMs } = logStatOf(meta.id);
+        const cached = healthLogCache.get(meta.id);
+        const resolved = resolveHealthLogExtraction(
+            cached,
+            { logSize, mtimeMs },
+            () => extractChildEventFactsFromLog(meta.id, { now }),
+        );
+        if (!resolved.hit) {
+            healthLogCache.set(meta.id, {
+                facts: resolved.facts as ChildEventFacts,
+                rawLog: resolved.rawLog as RawLogDiagnostic,
+                logSize,
+                mtimeMs,
+            });
+        }
+        return observeRunHealth({
+            status: meta.status,
+            now,
+            facts: resolved.facts as ChildEventFacts,
+            rawLog: resolved.rawLog as RawLogDiagnostic,
+            thresholds: loadHealthThresholdsFromConfig(),
+            startedAt: meta.startedAt,
+        });
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * Redraw the running-subagents widget above the editor; clear it when idle.
+ * Includes current-parent `running` and non-terminal `orphaned` rows so degraded
+ * health can appear passively (#67). Healthy/quiet rows stay on today's format.
+ */
 function renderWidget(): void {
     const ctx = uiCtx;
     if (!ctx || !ctx.hasUI) return;
     updateNavigatorFooter(ctx);
-    const running = navigatorRunningRuns();
+    // Live widget set: supervised running (#120 affordance) plus non-terminal
+    // orphaned so degraded health can appear passively (#67). Terminal lost is
+    // not kept here (list/result/notify cover it).
+    const running = listMetas().filter((m) => {
+        if (!ownedByThisParent(m)) return false;
+        if (isDismissed(m)) return false;
+        const st = effectiveStatus(m);
+        return st === "running" || st === "orphaned";
+    });
     if (running.length === 0) {
         applyWidget(WIDGET_CLEAR);
-        // Drop spend entries for runs that are no longer live so a restart
+        // Drop spend/health entries for runs that are no longer live so a restart
         // does not show stale totals for a recycled id.
         spendCache.clear();
+        healthLogCache.clear();
         stopTicker();
         return;
     }
@@ -195,15 +266,24 @@ function renderWidget(): void {
     for (const id of spendCache.keys()) {
         if (!live.has(id)) spendCache.delete(id);
     }
+    for (const id of healthLogCache.keys()) {
+        if (!live.has(id)) healthLogCache.delete(id);
+    }
     frame = (frame + 1) % SPINNER.length;
     const now = Date.now();
     const spendById: Record<string, { usage: Usage; tool: string | null }> = {};
+    const healthById: Record<string, HealthObservation> = {};
     for (const m of running) {
         spendById[m.id] = spendFor(m.id, now);
+        const obs = observeWidgetHealth(m, now);
+        if (obs) healthById[m.id] = obs;
     }
     // buildWidgetLines includes shortModel(m.model) — preserves #14 list-show-model.
-    const lines = buildWidgetLines({ running, frame, now, spendById });
-    const hint = navigatorFooterHint(running.length);
+    // healthById is silent for healthy/quiet; degraded appends a short suffix (#67).
+    const lines = buildWidgetLines({ running, frame, now, spendById, healthById });
+    // Running-only footer hint count stays on navigatorRunningCount (#120);
+    // widget may still paint orphaned health rows above.
+    const hint = navigatorFooterHint(navigatorRunningCount());
     if (hint) lines.push(hint);
     applyWidget(lines);
 }
@@ -233,31 +313,91 @@ function stopTicker(): void {
 /** How often supervision is reconciled. Independent of the 1 Hz widget tick. */
 const HEALTH_TICK_MS = 15_000;
 let healthTicker: ReturnType<typeof setInterval> | undefined;
+/** ExtensionAPI retained so health transitions can deliver coordinator follow-ups (#65). */
+let healthPi: ExtensionAPI | undefined;
 
-/** One reconciliation pass over current-parent running/orphaned runs. */
+/**
+ * Deliver a durable, deduped coordinator follow-up for orphaned/lost (#65).
+ *
+ * Markers live on RunMeta so reloads and repeated health ticks never re-fire.
+ * A marker means successful handoff only: written after sendMessage returns, or
+ * after intentionally suppressing the model path under callback:false. A failed
+ * or crashed delivery leaves the marker unset so reload/recovery can retry.
+ * `callback:false` suppresses the model message only — human ui.notify is
+ * handled by the caller. Uses the same non-interrupting followUp mechanics as
+ * completion, with distinct ATTENTION wording from buildHealthCallbackDelivery.
+ */
+function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, status: "orphaned" | "lost", now: number): void {
+    if (!pi) return;
+    if (status === "orphaned" && meta.orphanedCallbackSentAt !== undefined) return;
+    if (status === "lost" && meta.lostCallbackSentAt !== undefined) return;
+
+    const callback = meta.callback !== false;
+    const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
+    const delivery = buildHealthCallbackDelivery({ id: meta.id, label, status, callback });
+    if (!delivery) {
+        // callback:false — model follow-up suppressed; mark handled so recovery
+        // does not spin forever. Human notify remains the caller's job.
+        if (status === "orphaned") meta.orphanedCallbackSentAt = now;
+        else meta.lostCallbackSentAt = now;
+        writeMeta(meta);
+        return;
+    }
+    try {
+        pi.sendMessage(
+            { customType: "subagent-health", content: delivery.content, display: true },
+            delivery.options,
+        );
+    } catch {
+        // Handoff failed — leave marker unset so a later tick/reload can retry.
+        // Never let a delivery failure break the health ticker.
+        return;
+    }
+    // Marker = successful handoff (sendMessage returned), not mere attempt.
+    if (status === "orphaned") meta.orphanedCallbackSentAt = now;
+    else meta.lostCallbackSentAt = now;
+    writeMeta(meta);
+}
+
+/** One reconciliation + durable health-callback recovery pass. */
 function reconcileHealth(): void {
     const ctx = uiCtx;
+    const pi = healthPi;
     for (const summary of listMetas()) {
         if (!ownedByThisParent(summary)) continue;
-        if (summary.status !== "running" && summary.status !== "orphaned") continue;
+        // running/orphaned: process reconcile. lost: durable callback recovery only.
+        if (summary.status !== "running" && summary.status !== "orphaned" && summary.status !== "lost") continue;
         // Re-read under the id: finalizeRun / subagent_stop may have written a
         // terminal status since listMetas() snapshotted.
         const meta = readMeta(summary.id);
-        if (!meta || (meta.status !== "running" && meta.status !== "orphaned")) continue;
-        const result = reconcileRun(meta, realProcessProbe, Date.now());
-        if (!result.changed) continue;
-        Object.assign(meta, result.patch, { status: result.status });
-        writeMeta(meta);
-        if (!result.transition) continue;
-        // Human-visible health only. The coordinator model callback for
-        // orphaned/lost is a separate unit (#65).
-        const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
-        const note = result.status === "orphaned"
-            ? `Subagent ${label} lost supervision — related processes may still be alive (orphaned).`
-            : `Subagent ${label} is lost — no related process remains and no terminal result was observed.`;
-        try { ctx?.ui.notify(note, "warning"); } catch { /* ignore */ }
+        if (!meta) continue;
+        if (meta.status !== "running" && meta.status !== "orphaned" && meta.status !== "lost") continue;
+        const now = Date.now();
+
+        if (meta.status === "running" || meta.status === "orphaned") {
+            const result = reconcileRun(meta, realProcessProbe, now);
+            if (result.changed) {
+                Object.assign(meta, result.patch, { status: result.status });
+                writeMeta(meta);
+                if (result.transition) {
+                    // Human-visible health (always) on fresh transitions.
+                    const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
+                    const note = result.status === "orphaned"
+                        ? `Subagent ${label} lost supervision — related processes may still be alive (orphaned).`
+                        : `Subagent ${label} is lost — no related process remains and no terminal result was observed.`;
+                    try { ctx?.ui.notify(note, "warning"); } catch { /* ignore */ }
+                }
+            }
+        }
+
+        // Durable recovery independent of a fresh transition: any current
+        // orphaned/lost without a successful handoff marker must eventually
+        // deliver exactly one coordinator follow-up (or mark callback:false).
+        if (meta.status === "orphaned" || meta.status === "lost") {
+            deliverHealthCallback(pi, meta, meta.status, now);
+        }
     }
-    // Stop existing the moment nothing current-parent needs monitoring.
+    // Stop existing the moment nothing current-parent needs monitoring/recovery.
     if (!needsMonitoring(listMetas())) stopHealthTicker();
 }
 
@@ -452,6 +592,10 @@ function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: 
 }
 
 export default function (pi: ExtensionAPI) {
+    // Capture for the health ticker (module-level); needed for orphaned/lost
+    // coordinator follow-ups that fire outside a tool-call stack (#65).
+    healthPi = pi;
+
     type SpawnParams = {
         prompt: string; name?: string; model?: string; tools?: string;
         exclude_tools?: string; clean?: boolean; sandbox?: boolean;
@@ -854,14 +998,20 @@ export default function (pi: ExtensionAPI) {
         installNavigator(ctx);
         lastNavigatorHint = undefined;
         updateNavigatorFooter(ctx);
-        if (listMetas().some((m) => ownedByThisParent(m) && effectiveStatus(m) === "running")) {
+        // Resume passive widget for supervised running and non-terminal orphaned (#67).
+        if (listMetas().some((m) => {
+            if (!ownedByThisParent(m) || isDismissed(m)) return false;
+            const st = effectiveStatus(m);
+            return st === "running" || st === "orphaned";
+        })) {
             ensureTicker();
             renderWidget();
         } else {
             renderWidget();
         }
-        // Resume supervision reconciliation across /reload while current-parent
-        // running/orphaned work exists; the ticker stops itself when idle.
+        // Resume supervision reconciliation + durable health-callback recovery
+        // across /reload while current-parent work still needs the ticker
+        // (running/orphaned, or unmarked lost); it stops itself when idle.
         if (needsMonitoring(listMetas())) ensureHealthTicker();
     });
 
