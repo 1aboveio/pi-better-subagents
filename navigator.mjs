@@ -1,6 +1,6 @@
 /**
  * Pure seams for the TUI subagent navigator (issues #45 list, #46 detail,
- * #47 two-press close).
+ * #47 two-press close, #69 health display).
  *
  * Kept free of pi / pi-tui imports (mirrors widget.mjs) so unit tests pin the
  * behavior contracts without a live TUI. index.ts injects the pi-specific
@@ -17,7 +17,19 @@
  * dispose that timer on every exit path (back, Escape, overlay close, teardown).
  * Close arm timers (#47) dispose on the same paths plus selection change and
  * list↔detail transitions.
+ *
+ * Health (#69) reuses #66/#67 observation helpers: navigator rows keep the
+ * scan order name/id · model[+effort] · elapsed · tool · spend, then append
+ * durable status + ≤2 compact health facts. Status is colorized semantically
+ * with visible-width-aware truncation.
  */
+
+import {
+    formatNavigatorHealthFacts,
+    statusThemeColor,
+    truncateToVisibleWidth,
+    visibleWidth,
+} from "./health-surface.mjs";
 
 /** Detail-view refresh cadence (ms). Mirrors the live widget tick. */
 export const DETAIL_TICK_MS = 1000;
@@ -176,19 +188,33 @@ export function isNavigatorUiAvailable(ctx) {
  * @param {(model?: string) => string} deps.shortModel - widget shortModel
  * @param {(ms: number) => string} deps.fmtElapsed - widget fmtElapsed
  * @param {(m: object) => string} deps.spendFor - spend summary or "" (e.g. fmtSpend(parseRun(id).usage))
+ * @param {(m: object) => string} [deps.toolFor] - current/used tool label or ""
+ * @param {(m: object) => string|undefined} [deps.effortFor] - model effort when available
+ * @param {(m: object) => object|undefined} [deps.healthFor] - #66 HealthObservation
  * @param {number} [deps.now]
  */
 export function buildNavigatorRows(metas, deps) {
     const now = deps.now ?? Date.now();
-    return metas.map((m) => ({
-        id: m.id,
-        name: m.name,
-        status: deps.effectiveStatus(m),
-        model: deps.shortModel(m.model),
-        // Terminal runs freeze elapsed at endedAt; running runs tick to now.
-        elapsed: deps.fmtElapsed((m.endedAt ?? now) - m.startedAt),
-        spend: deps.spendFor(m) || "",
-    }));
+    return metas.map((m) => {
+        const status = deps.effectiveStatus(m);
+        const health = typeof deps.healthFor === "function" ? deps.healthFor(m) : undefined;
+        const effort = typeof deps.effortFor === "function" ? deps.effortFor(m) : (m.effort ?? m.modelEffort);
+        const tool = typeof deps.toolFor === "function" ? (deps.toolFor(m) || "") : "";
+        return {
+            id: m.id,
+            name: m.name,
+            status,
+            model: deps.shortModel(m.model),
+            // Optional effort stays adjacent to model when the host exposes it.
+            effort: effort ? String(effort) : undefined,
+            // Terminal runs freeze elapsed at endedAt; running runs tick to now.
+            elapsed: deps.fmtElapsed((m.endedAt ?? now) - m.startedAt),
+            tool,
+            spend: deps.spendFor(m) || "",
+            // At most two compact facts; empty for healthy/quiet (#67/#69).
+            healthFacts: formatNavigatorHealthFacts(health),
+        };
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -228,31 +254,73 @@ export function moveSelection(state, delta) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Format one navigator row in scan order (#60/#69):
+ *   name/id · model [· effort] · elapsed [· tool] [· spend] · status [· fact · fact]
+ * Status is colorized when `opts.colorizeStatus` is true (overlay path).
+ *
+ * @param {object} r - buildNavigatorRows entry
+ * @param {object} [opts]
+ * @param {boolean} [opts.colorizeStatus]
+ * @param {(color: string, s: string) => string} [opts.fg]
+ */
+export function formatNavigatorRowText(r, opts = {}) {
+    const name = r.name ?? r.id ?? "?";
+    const model = r.model ?? "?";
+    const modelPart = r.effort ? `${model} ${r.effort}` : model;
+    const parts = [name, modelPart, r.elapsed ?? "?"];
+    if (r.tool) parts.push(r.tool);
+    if (r.spend) parts.push(r.spend);
+
+    const statusRaw = String(r.status ?? "?");
+    const statusText = opts.colorizeStatus && typeof opts.fg === "function"
+        ? opts.fg(statusThemeColor(statusRaw), statusRaw)
+        : statusRaw;
+    parts.push(statusText);
+
+    const facts = Array.isArray(r.healthFacts) ? r.healthFacts.filter(Boolean).slice(0, 2) : [];
+    for (const f of facts) parts.push(f);
+    return parts.join(" · ");
+}
+
+/**
  * Plain-text navigator lines: title, one `> `/`  `-prefixed line per row, and
- * a help line. Every line is passed through `opts.truncate(line, width)` so the
- * TUI width contract (no line wider than `width`) holds at the seam; index.ts
- * injects pi-tui's ANSI-safe truncateToWidth. Theme styling is applied by the
- * overlay component AFTER truncation, so visible width is preserved.
+ * a help line. Every line is passed through a visible-width-aware truncate so
+ * the TUI width contract holds even when status is ANSI-colorized. index.ts
+ * injects pi-tui's truncateToWidth; when colorization is applied first we fall
+ * back to `truncateToVisibleWidth` if the injected truncator is width-naive.
+ *
+ * @param {object} state
+ * @param {object} [opts]
+ * @param {number} [opts.width]
+ * @param {(s: string, w: number) => string} [opts.truncate]
+ * @param {boolean} [opts.colorizeStatus] - colorize durable status (overlay)
+ * @param {(color: string, s: string) => string} [opts.fg]
  */
 export function buildNavigatorLines(state, opts = {}) {
     const width = opts.width ?? 80;
-    const truncate = opts.truncate ?? ((s) => s);
+    const truncate = opts.truncate ?? truncateToVisibleWidth;
     const rows = state.rows ?? [];
     const lines = [`Subagents · ${rows.length}`];
     if (rows.length === 0) {
         lines.push("  (no visible subagent runs)");
     }
+    const colorize = opts.colorizeStatus === true;
+    const fg = opts.fg;
     for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
         const prefix = i === state.selected ? "> " : "  ";
-        const parts = [r.name ?? r.id, r.status, r.model, r.elapsed];
-        if (r.spend) parts.push(r.spend);
-        lines.push(prefix + parts.join(" · "));
+        const body = formatNavigatorRowText(r, { colorizeStatus: colorize, fg });
+        lines.push(prefix + body);
     }
     const selected = rows.length > 0 ? rows[state.selected] : null;
-    const action = selected?.status === "running" ? "x stop" : (selected ? "x dismiss" : null);
+    const stoppable = selected?.status === "running" || selected?.status === "orphaned";
+    const action = stoppable ? "x stop" : (selected ? "x dismiss" : null);
     lines.push(["↑↓ select", "enter open", action, "esc close"].filter(Boolean).join(" · "));
-    return lines.map((l) => truncate(l, width));
+    return lines.map((l) => {
+        const cut = truncate(l, width);
+        // Guarantee visible width even if host truncator counts ANSI bytes.
+        return visibleWidth(cut) > width ? truncateToVisibleWidth(cut, width) : cut;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +339,8 @@ export function buildNavigatorLines(state, opts = {}) {
  * @param {(model?: string) => string} deps.shortModel
  * @param {(ms: number) => string} deps.fmtElapsed
  * @param {(u: object) => string} deps.fmtSpend
+ * @param {(meta: object) => object|undefined} [deps.healthFor] - #66 HealthObservation
+ * @param {(meta: object) => string|undefined} [deps.effortFor]
  * @param {number} [deps.now]
  * @returns {object|null} detail fields, or null when the run is unknown
  */
@@ -281,12 +351,17 @@ export function buildNavigatorDetail(id, deps) {
     const parsed = deps.parseRun(id);
     const toolCalls = parsed.toolCalls ?? [];
     const status = deps.effectiveStatus(meta);
-    const running = status === "running";
+    const running = status === "running" || status === "orphaned";
+    const health = typeof deps.healthFor === "function" ? deps.healthFor(meta) : undefined;
+    const effortRaw = typeof deps.effortFor === "function"
+        ? deps.effortFor(meta)
+        : (meta.effort ?? meta.modelEffort);
     return {
         id: meta.id,
         name: meta.name,
         status,
         model: deps.shortModel(meta.model),
+        effort: effortRaw ? String(effortRaw) : undefined,
         elapsed: deps.fmtElapsed((meta.endedAt ?? now) - meta.startedAt),
         tools: toolCalls.length ? toolCalls.join(", ") : "",
         // Only a live run has a "current" tool (the latest invocation).
@@ -294,40 +369,222 @@ export function buildNavigatorDetail(id, deps) {
         spend: deps.fmtSpend(parsed.usage) || "",
         // Terminal prefers the final answer; running shows the live activity.
         output: (running ? (parsed.lastActivity || parsed.finalText) : (parsed.finalText || parsed.lastActivity)) || "",
+        // Process identity from durable metadata (#63).
+        pid: meta.pid,
+        pgid: meta.pgid,
+        pidStartTime: meta.pidStartTime,
+        orphanedAt: meta.orphanedAt,
+        lostAt: meta.lostAt,
+        orphanedCallbackSentAt: meta.orphanedCallbackSentAt,
+        lostCallbackSentAt: meta.lostCallbackSentAt,
+        // Full #66 observation for sectioned detail rendering (#69).
+        health: health ?? null,
+        now,
     };
 }
 
+/** Format a ms age as a short label, or "—" when unknown. */
+function fmtDetailAge(ms) {
+    if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return "—";
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m`;
+    const h = Math.floor(m / 60);
+    return `${h}h${m % 60}m`;
+}
+
+/** Format an absolute ms timestamp relative to `now`, or absolute ISO-ish. */
+function fmtDetailTs(ts, now) {
+    if (typeof ts !== "number" || !Number.isFinite(ts)) return "—";
+    if (typeof now === "number" && Number.isFinite(now)) {
+        return `${fmtDetailAge(Math.max(0, now - ts))} ago`;
+    }
+    return String(ts);
+}
+
 /**
- * Plain-text detail lines. Truncated BEFORE any theme styling (callers style
- * after), so visible width never exceeds `width`.
+ * Plain-text detail lines with sectioned health (#69). Truncated with
+ * visible-width awareness so ANSI status colorization stays width-safe.
+ *
+ * Sections (when data is present):
+ *   header (title, status, model/effort, elapsed, spend, tools summary)
+ *   process / liveness
+ *   activity
+ *   compaction  (separate from tool + model)
+ *   active tool
+ *   model call / error
+ *   last meaningful activity / last log write
+ *   thresholds
+ *   callbacks
+ *   output
  */
 export function buildDetailLines(detail, opts = {}) {
     const width = opts.width ?? 80;
-    const truncate = opts.truncate ?? ((s) => s);
+    const truncate = opts.truncate ?? truncateToVisibleWidth;
+    const fg = typeof opts.fg === "function" ? opts.fg : null;
+    const colorize = opts.colorizeStatus === true && fg;
     if (!detail) {
         return ["(run unavailable)", "← back · esc close"].map((l) => truncate(l, width));
     }
     const title = detail.name || detail.id || "?";
     const lines = [];
     lines.push(title);
-    lines.push(`status  ${detail.status ?? "?"}`);
-    lines.push(`model   ${detail.model ?? "?"}`);
+
+    const statusRaw = String(detail.status ?? "?");
+    const statusText = colorize ? fg(statusThemeColor(statusRaw), statusRaw) : statusRaw;
+    lines.push(`status  ${statusText}`);
+
+    const model = detail.model ?? "?";
+    lines.push(detail.effort ? `model   ${model} · effort ${detail.effort}` : `model   ${model}`);
     lines.push(`elapsed ${detail.elapsed ?? "?"}`);
-    // Prefer "current" while running; fall back to the full used-tools list.
+
+    // Legacy tools summary (still useful as a used-tools list).
     const toolsLabel = detail.currentTool
         ? `current ${detail.currentTool}`
         : (detail.tools ? `tools   ${detail.tools}` : "tools   (none)");
     lines.push(toolsLabel);
     lines.push(detail.spend ? `spend   ${detail.spend}` : "spend   (none)");
+
+    const h = detail.health;
+    const now = detail.now;
+
+    // ---- process / liveness
+    lines.push("process");
+    const pid = detail.pid != null ? String(detail.pid) : "—";
+    const pgid = detail.pgid != null ? String(detail.pgid) : "—";
+    const startTok = detail.pidStartTime != null ? String(detail.pidStartTime) : "—";
+    lines.push(`  pid ${pid} · pgid ${pgid}`);
+    lines.push(`  start-token ${startTok}`);
+    // Prefer observation liveness, but never claim "supervised" when the
+    // detail header already shows a non-running effective status (legacy
+    // dead-running metadata → effective "exited" must read as terminal).
+    let live = h?.process?.liveness;
+    if (!live || (detail.status !== "running" && live === "supervised")) {
+        live = detail.status === "orphaned" ? "orphaned"
+            : detail.status === "lost" ? "lost"
+            : detail.status === "running" ? "supervised"
+            : "terminal";
+    }
+    lines.push(`  liveness ${live}`);
+    if (detail.orphanedAt != null) lines.push(`  orphaned ${fmtDetailTs(detail.orphanedAt, now)}`);
+    if (detail.lostAt != null) lines.push(`  lost ${fmtDetailTs(detail.lostAt, now)}`);
+
+    // ---- activity
+    lines.push("activity");
+    lines.push(`  ${h?.activity ?? "—"}`);
+    if (h?.meaningfulAgeMs != null) {
+        lines.push(`  last meaningful ${fmtDetailAge(h.meaningfulAgeMs)} ago`);
+    } else if (h?.lastMeaningfulAt != null) {
+        lines.push(`  last meaningful ${fmtDetailTs(h.lastMeaningfulAt, now)}`);
+    }
+
+    // ---- compaction (separate section)
+    lines.push("compaction");
+    if (h?.compaction) {
+        const c = h.compaction;
+        const age = c.ageMs != null ? ` · ${fmtDetailAge(c.ageMs)}` : "";
+        lines.push(`  ${c.state}${age}`);
+        if (c.last) {
+            const bits = [];
+            if (c.last.reason) bits.push(c.last.reason);
+            if (c.last.aborted) bits.push("aborted");
+            if (c.last.errorMessage) bits.push(c.last.errorMessage);
+            if (bits.length) lines.push(`  last ${bits.join(" · ")}`);
+        }
+    } else {
+        lines.push("  —");
+    }
+
+    // ---- active tool (separate from compaction + model)
+    lines.push("active tool");
+    if (h?.tool) {
+        const t = h.tool;
+        if (t.state === "idle" || !t.active) {
+            lines.push("  idle");
+        } else {
+            const age = t.ageMs != null ? ` · ${fmtDetailAge(t.ageMs)}` : "";
+            lines.push(`  ${t.state} · ${t.active.toolName}${age}`);
+        }
+    } else if (detail.currentTool) {
+        lines.push(`  ${detail.currentTool}`);
+    } else {
+        lines.push("  idle");
+    }
+
+    // ---- model call / error (separate)
+    lines.push("model");
+    if (h?.model) {
+        const m = h.model;
+        lines.push(`  state ${m.state}`);
+        if (m.listWarning) lines.push(`  warning ${m.listWarning}`);
+        if (m.retry) {
+            const a = m.retry.attempt != null ? String(m.retry.attempt) : "?";
+            const max = m.retry.maxAttempts != null ? String(m.retry.maxAttempts) : "?";
+            lines.push(`  retry ${a}/${max}`);
+        }
+        if (m.lastError) {
+            const age = m.lastError.at != null ? ` · ${fmtDetailTs(m.lastError.at, now)}` : "";
+            lines.push(`  last error ${m.lastError.message}${age}`);
+        }
+        if (Array.isArray(m.errorHistory) && m.errorHistory.length > 0) {
+            const recent = m.errorHistory.slice(-3);
+            for (const e of recent) {
+                const age = e.at != null ? ` · ${fmtDetailTs(e.at, now)}` : "";
+                lines.push(`  history ${e.message}${age}`);
+            }
+        }
+        if (m.longModelCall) {
+            const age = m.longModelCall.ageMs != null ? ` · ${fmtDetailAge(m.longModelCall.ageMs)}` : "";
+            lines.push(`  long call${age}`);
+        }
+    } else {
+        lines.push("  —");
+    }
+
+    // ---- last log write (diagnostic)
+    lines.push("log");
+    if (h?.rawLog && (h.rawLog.mtimeMs != null || h.rawLog.sizeBytes != null || h.rawLog.error)) {
+        if (h.rawLog.mtimeMs != null) lines.push(`  last write ${fmtDetailTs(h.rawLog.mtimeMs, now)}`);
+        if (h.rawLog.sizeBytes != null) lines.push(`  size ${h.rawLog.sizeBytes}B`);
+        if (h.rawLog.error) lines.push(`  error ${h.rawLog.error}`);
+    } else {
+        lines.push("  —");
+    }
+
+    // ---- thresholds
+    lines.push("thresholds");
+    if (h?.thresholds) {
+        const t = h.thresholds;
+        lines.push(`  quiet ${fmtDetailAge(t.quietMs)} · stale ${fmtDetailAge(t.staleMs)}`);
+        lines.push(`  long-tool ${fmtDetailAge(t.longToolMs)} · long-compact ${fmtDetailAge(t.longCompactionMs)}`);
+    } else {
+        lines.push("  —");
+    }
+
+    // ---- callback notification timestamps
+    lines.push("callbacks");
+    const cbOrphan = detail.orphanedCallbackSentAt;
+    const cbLost = detail.lostCallbackSentAt;
+    if (cbOrphan != null || cbLost != null) {
+        if (cbOrphan != null) lines.push(`  orphaned notified ${fmtDetailTs(cbOrphan, now)}`);
+        if (cbLost != null) lines.push(`  lost notified ${fmtDetailTs(cbLost, now)}`);
+    } else {
+        lines.push("  (none)");
+    }
+
     lines.push("output");
     const body = detail.output && String(detail.output).trim() ? String(detail.output) : "(no output yet)";
-    // Split multi-line output; each physical line is truncated independently.
     for (const raw of body.split(/\r?\n/)) {
         lines.push(raw.length ? raw : " ");
     }
-    const action = detail.status === "running" ? "x stop" : "x dismiss";
+    const stoppable = detail.status === "running" || detail.status === "orphaned";
+    const action = stoppable ? "x stop" : "x dismiss";
     lines.push(`← back · ${action} · esc close`);
-    return lines.map((l) => truncate(l, width));
+    return lines.map((l) => {
+        const cut = truncate(l, width);
+        return visibleWidth(cut) > width ? truncateToVisibleWidth(cut, width) : cut;
+    });
 }
 
 /** Keep selection on `id` when still present; otherwise clamp in place. */
@@ -596,19 +853,38 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
 
     return {
         render(width) {
+            // Colorize durable status inside the line (visible-width-aware),
+            // then apply row-level accent/dim only to non-status chrome so the
+            // semantic status color is not overwritten by whole-line theming.
             if (mode === "detail") {
-                const lines = buildDetailLines(detail, { width, truncate: deps.truncate });
+                const lines = buildDetailLines(detail, {
+                    width,
+                    truncate: deps.truncate,
+                    colorizeStatus: true,
+                    fg,
+                });
                 return lines.map((line, i) => {
                     if (i === 0) return fg("accent", line);
                     if (i === lines.length - 1) return fg("dim", line);
                     return line;
                 });
             }
-            const lines = buildNavigatorLines(state, { width, truncate: deps.truncate });
+            const lines = buildNavigatorLines(state, {
+                width,
+                truncate: deps.truncate,
+                colorizeStatus: true,
+                fg,
+            });
             return lines.map((line, i) => {
                 if (i === 0) return fg("accent", line);
                 if (i === lines.length - 1) return fg("dim", line);
-                if (state.rows.length > 0 && i === 1 + state.selected) return fg("accent", line);
+                // Selected row: keep the line readable without recoloring the
+                // already-semantic status token (status is colored in-body).
+                if (state.rows.length > 0 && i === 1 + state.selected) {
+                    return line.startsWith("> ")
+                        ? fg("accent", "> ") + line.slice(2)
+                        : fg("accent", line);
+                }
                 return line;
             });
         },

@@ -142,6 +142,20 @@
       "reachable": true
     },
     {
+      "id": "navigator.health",
+      "kind": "service",
+      "class": "read",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.detail-health",
+      "kind": "service",
+      "class": "read",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
       "id": "subagent.health-callback",
       "kind": "service",
       "class": "mutation",

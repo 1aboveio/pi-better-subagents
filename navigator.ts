@@ -24,6 +24,7 @@ export {
     moveSelection,
     selectById,
     applyNavigatorRows,
+    formatNavigatorRowText,
     buildNavigatorLines,
     createNavigatorOverlayComponent,
     createNavigatorOverlayFactory,

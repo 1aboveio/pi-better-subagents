@@ -149,3 +149,128 @@ export function appendHealthDiagnostic(body, healthLine) {
     if (nl === -1) return `${body}\n${healthLine}`;
     return `${body.slice(0, nl)}\n${healthLine}${body.slice(nl)}`;
 }
+
+/**
+ * Compact health facts for TUI navigator rows (#69).
+ * Healthy/quiet stays empty. Durable status is rendered separately, so
+ * orphaned/lost labels are not repeated as facts. Cap is two facts.
+ *
+ * @param {{ status?: string, activity?: string, compactFacts?: string[], tool?: { state?: string, active?: { toolName?: string } } }|null|undefined} obs
+ * @returns {string[]}
+ */
+export function formatNavigatorHealthFacts(obs) {
+    if (!obs || !isActionableHealth(obs)) return [];
+    const facts = [];
+    for (const f of surfaceableCompactFacts(obs)) {
+        if (f && f !== obs.status && !facts.includes(f)) facts.push(f);
+    }
+    if (obs.activity === "stale" && !facts.some((f) => /\bstale\b/i.test(f))) {
+        facts.push("stale");
+    }
+    // Process-group / log diagnostics when orphaned/lost and no phase facts.
+    if (facts.length === 0 && (obs.status === "orphaned" || obs.status === "lost")) {
+        const live = obs.process?.liveness;
+        if (live && live !== obs.status) facts.push(live);
+        const logAge = obs.rawLog?.mtimeMs;
+        // raw age is computed by callers into compactFacts when needed; skip here.
+        void logAge;
+    }
+    return facts.slice(0, 2);
+}
+
+/**
+ * Semantic theme color for a durable/effective run status in the TUI.
+ * completed → success; failed/lost → danger; killed/orphaned → warning;
+ * running → accent; anything else → dim.
+ *
+ * @param {string|undefined|null} status
+ * @returns {string}
+ */
+export function statusThemeColor(status) {
+    switch (String(status ?? "").toLowerCase()) {
+        case "completed":
+            return "success";
+        case "failed":
+        case "lost":
+            return "danger";
+        case "killed":
+        case "orphaned":
+            return "warning";
+        case "running":
+            return "accent";
+        default:
+            return "dim";
+    }
+}
+
+/** Strip CSI / OSC ANSI sequences for visible-width measurement. */
+const ANSI_RE = new RegExp(
+    // eslint-disable-next-line no-control-regex
+    "[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[a-zA-Z\\d]*)*)?\\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~]))",
+    "g",
+);
+
+/**
+ * Visible (cell) width of a string, ignoring ANSI styling sequences.
+ * Also strips the lightweight `<color>…</>` test theme markers used in unit stubs.
+ *
+ * @param {string} s
+ * @returns {number}
+ */
+export function visibleWidth(s) {
+    const plain = String(s ?? "")
+        .replace(ANSI_RE, "")
+        // Theme stub markers from unit tests: <accent>…</> (closing tag is bare </>).
+        .replace(/<\/?[a-zA-Z][\w-]*>/g, "")
+        .replace(/<\/>/g, "");
+    // Treat combining marks / wide chars as single cells — sufficient for our
+    // ASCII status tokens and English labels; pi-tui handles full East-Asian.
+    return plain.length;
+}
+
+/**
+ * Truncate to a maximum visible width while preserving ANSI / theme markers.
+ * Prefer the host's `truncateToWidth` when available (index.ts injects pi-tui);
+ * this fallback keeps unit tests width-safe when color escapes are present.
+ *
+ * @param {string} s
+ * @param {number} width
+ * @returns {string}
+ */
+export function truncateToVisibleWidth(s, width) {
+    const str = String(s ?? "");
+    const max = Math.max(0, Number(width) || 0);
+    if (visibleWidth(str) <= max) return str;
+
+    // Walk code units, skipping ANSI and <tag> markers for the budget.
+    let out = "";
+    let vis = 0;
+    let i = 0;
+    while (i < str.length && vis < max) {
+        // ANSI CSI/OSC
+        if (str[i] === "\u001b" || str[i] === "\u009b") {
+            const m = str.slice(i).match(ANSI_RE);
+            if (m && m.index === 0) {
+                out += m[0];
+                i += m[0].length;
+                continue;
+            }
+        }
+        // Lightweight theme markers from test stubs: <accent>…</>
+        if (str[i] === "<") {
+            const close = str.indexOf(">", i);
+            if (close !== -1) {
+                const tag = str.slice(i, close + 1);
+                if (/^<\/?[a-zA-Z][\w-]*>$/.test(tag) || tag === "</>") {
+                    out += tag;
+                    i = close + 1;
+                    continue;
+                }
+            }
+        }
+        out += str[i];
+        vis += 1;
+        i += 1;
+    }
+    return out;
+}
