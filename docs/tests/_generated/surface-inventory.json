@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-26T15:20:00.000Z",
+  "generatedAt": "2026-07-26T08:15:22.000Z",
   "surfaces": [
     {
       "id": "widget.render",
@@ -195,6 +195,13 @@
       "kind": "service",
       "class": "mutation",
       "path": "index.ts",
+      "reachable": true
+    },
+    {
+      "id": "stop.orphaned-cleanup",
+      "kind": "service",
+      "class": "mutation",
+      "path": "stop.ts",
       "reachable": true
     }
   ]
