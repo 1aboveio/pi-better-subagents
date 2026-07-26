@@ -289,36 +289,51 @@ describe("registered extension path: navigator close second-x", () => {
     // @level integration
     it("terminal run: registered TUI path second x dismisses and preserves terminal status", async () => {
         const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
+        const affordancePid = spawnSleeper();
+        const affordanceId = nav.seedRun({
+            id: trackDisk(`sa_t47_ext_term_afford_${Date.now()}`),
+            name: "live-affordance",
+            status: "running",
+            pid: affordancePid,
+            startedAt: 50,
+        });
         const id = nav.seedRun({
             id: trackDisk(`sa_t47_ext_term_${Date.now()}`),
             name: "done-job",
             status: "completed",
+            startedAt: 100,
             endedAt: 99,
         });
 
-        await nav.start();
-        await nav.openViaLeftKey();
+        try {
+            await nav.start();
+            await nav.openViaLeftKey();
 
-        // First x arms only — no dismiss yet.
-        nav.pressX();
-        let back = registry.readMeta(id);
-        assert.equal(back.status, "completed");
-        assert.equal(back.dismissedAt, undefined, "first x must not dismiss");
-        assert.ok(
-            nav.statusCalls.some((c) => c[0] === "subagents-close" && String(c[1] ?? "").includes("dismiss")),
-            "first x should publish a close-confirm hint on subagents-close",
-        );
+            // First x arms only — no dismiss yet.
+            nav.pressX();
+            let back = registry.readMeta(id);
+            assert.equal(back.status, "completed");
+            assert.equal(back.dismissedAt, undefined, "first x must not dismiss");
+            assert.ok(
+                nav.statusCalls.some((c) => c[0] === "subagents-close" && String(c[1] ?? "").includes("dismiss")),
+                "first x should publish a close-confirm hint on subagents-close",
+            );
 
-        // Second x acts through navigatorCloseRun → executeNavigatorClose with real stopRun.
-        nav.pressX();
-        back = registry.readMeta(id);
-        assert.equal(back.status, "completed", "terminal status preserved");
-        assert.equal(typeof back.dismissedAt, "number", "second x must set dismissedAt");
-        assert.equal(back.endedAt, 99, "endedAt unchanged");
-        assert.ok(
-            !registry.navigatorVisibleRuns(registry.listMetas(), THIS_PID).some((m) => m.id === id),
-            "dismissed terminal run leaves navigator visibility",
-        );
+            // Second x acts through navigatorCloseRun → executeNavigatorClose with real stopRun.
+            nav.pressX();
+            back = registry.readMeta(id);
+            assert.equal(back.status, "completed", "terminal status preserved");
+            assert.equal(typeof back.dismissedAt, "number", "second x must set dismissedAt");
+            assert.equal(back.endedAt, 99, "endedAt unchanged");
+            assert.equal(processExists(affordancePid), true, "affordance run must not be selected or stopped");
+            assert.ok(
+                !registry.navigatorVisibleRuns(registry.listMetas(), THIS_PID).some((m) => m.id === id),
+                "dismissed terminal run leaves navigator visibility",
+            );
+        } finally {
+            registry.dismissRun(affordanceId);
+            try { process.kill(-affordancePid, "SIGTERM"); } catch { try { process.kill(affordancePid, "SIGTERM"); } catch { /* ignore */ } }
+        }
     });
 
     // @covers navigator.close

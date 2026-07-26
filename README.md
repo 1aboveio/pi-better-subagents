@@ -245,16 +245,19 @@ unchanged in every mode.
 
 ### Open
 
-- With the editor **empty** and at least one visible current-parent run, press
+- With the editor **empty** and at least one non-dismissed current-parent run
+  still running, press
   `←` to open the navigator overlay.
 - If the editor contains text, `←` keeps normal cursor-left behavior.
-- While visible runs exist, the default footer shows `← subagents · N`. The
-  hint clears when every visible run is dismissed (or none remain).
+- While running runs exist, the default footer shows `← subagents · N`. The
+  live widget also includes the same hint for terminals that do not render the
+  default footer status. The hint clears when no non-dismissed current-parent
+  run is still running.
 
 ### List view
 
 - Newest visible runs first (running and terminal). Dismissed runs are hidden
-  from this list and from the footer count only.
+  from this list and from the running-count affordance only.
 - Each row: name or id · status · model · elapsed · spend.
 - `↑` / `↓` move selection. Selection stays on the same run across status
   refreshes when that run is still visible; if it disappears, selection clamps
