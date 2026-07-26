@@ -267,7 +267,11 @@ is unchanged in every mode.
 - The overlay list is available after returning from detail with `←`. Newest
   visible runs appear first (running and terminal). Dismissed runs are hidden
   from this list and from the running-count affordance only.
-- Each row: name or id · status · model · elapsed · spend.
+- Each row (scan order): name or id · model [· effort] · elapsed [· tool]
+  [· spend] · status [· up to two compact health facts]. Durable status is
+  colorized (completed success, failed/lost danger, killed/orphaned warning,
+  running accent). Healthy/quiet rows stay low-noise; degraded rows may append
+  facts such as compacting, long tool, model error, or stale.
 - `↑` / `↓` move selection. Selection stays on the same run across status
   refreshes when that run is still visible; if it disappears, selection clamps
   to a remaining row.
@@ -277,8 +281,11 @@ is unchanged in every mode.
 
 ### Detail view
 
-- Shows status, model, elapsed, current/used tools, spend, and parsed output.
-  The view refreshes about once per second while open.
+- Shows status (colorized), model/effort, elapsed, tools, spend, and parsed
+  output, plus sectioned health: process identity/liveness, activity,
+  compaction, active tool, model call/error, last log write, thresholds, and
+  callback notification timestamps. Compaction, active tool, and model state
+  are separate sections. The view refreshes about once per second while open.
 - `←` returns to the list (selection restored on the viewed run when still
   visible).
 - `x` arms Stop for a running run, or Dismiss for a terminal run.
