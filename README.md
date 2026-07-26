@@ -40,7 +40,7 @@ launch is the result · completion triggers fetch · the foreground never blocks
 | `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; same optional params as `subagent_spawn`), `onCapacity` (`reject` or `launch-available`). |
 | `subagent_list` | never | List running/finished runs with status, model, elapsed, spend, and batch info. Params: `all`, `limit` (default 20, max 100; larger values are clamped), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Degraded health facts (stale, long tool, compacting, model error, …) appear only when actionable. |
 | `subagent_output` | never | Tail a run's live output as it stands right now. Includes a `[health: …]` diagnostic for orphaned, lost, and degraded running runs; healthy/quiet stays quiet. |
-| `subagent_result` | never | Read a finished run's final output (says "still running" otherwise). For `orphaned` returns a non-final diagnostic plus best-current artifacts; for `lost` a terminal-unknown diagnostic plus best-available artifacts. |
+| `subagent_result` | never | Read a finished run's final output (says "still running" otherwise). For `orphaned` returns a non-final diagnostic plus best-current artifacts; for `lost` a terminal-unknown diagnostic plus best-available artifacts. In the TUI, the result is folded by default for display only; expanding the tool row shows the full bounded result, and the model-facing payload is unchanged. |
 | `subagent_stop` | never | SIGTERM a running run's process group. |
 
 ## Non-blocking, by construction
@@ -230,6 +230,11 @@ Driven by the child's `--mode json` usage events:
 - **On demand** — `subagent_list`, `subagent_output`, and `subagent_result` all
   carry `elapsed · N tok (↑in ↓out) · $cost · tools`. The completion notice and
   toast include the final elapsed + spend too.
+- **Folded result display.** In interactive TUI sessions, `subagent_result`
+  renders a compact preview by default so long child answers do not flood the
+  transcript. Clicking the tool row, or using the row expand action, shows the
+  full bounded result. This is a display concern only: the tool still returns
+  the complete bounded `content` payload to the model.
 
 Spend is summed from each finalized assistant turn's `usage` (so multi-turn
 tool-using runs total correctly), and cost comes straight from the model's

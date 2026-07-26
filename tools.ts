@@ -36,6 +36,8 @@ import {
 import {
     appendHealthDiagnostic,
     formatHealthDiagnosticLine,
+    statusThemeColor,
+    truncateToVisibleWidth,
 } from "./health-surface.mjs";
 
 /** Observe one run for list/output/result diagnostics (#66/#67). Best-effort. */
@@ -67,6 +69,153 @@ type TypeModule = {
 
 /** pi's tool-result text shape. */
 export const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
+
+const SUBAGENT_RESULT_PREVIEW_LINES = 8;
+
+function resultTextContent(result: unknown): string {
+    const content = (result as { content?: Array<{ type?: string; text?: string }> })?.content;
+    if (!Array.isArray(content)) return "";
+    return content
+        .filter((c) => c && (c.type === undefined || c.type === "text"))
+        .map((c) => c.text ?? "")
+        .join("\n");
+}
+
+function parseSubagentResultHead(head: string): { id?: string; status?: string } {
+    const raw = String(head ?? "");
+    const match = raw.match(/^\[([^\s\]]+)\s+·\s+([^·\]]+)/);
+    if (!match) return {};
+    return { id: match[1], status: match[2]?.trim() };
+}
+
+function nonEmptyPreviewLines(lines: string[]): string[] {
+    const preview: string[] = [];
+    for (const line of lines) {
+        if (/^---\s+raw log tail\s+---$/i.test(line.trim())) break;
+        if (line.trim() === "") continue;
+        preview.push(line);
+        if (preview.length >= SUBAGENT_RESULT_PREVIEW_LINES) break;
+    }
+    return preview;
+}
+
+export function buildSubagentResultDisplayDetails(body: string) {
+    const fullLines = String(body ?? "").split(/\r?\n/);
+    const head = fullLines[0] || "subagent_result";
+    const { id, status } = parseSubagentResultHead(head);
+    const rest = fullLines.slice(1);
+    const compactLines = nonEmptyPreviewLines(rest);
+    return {
+        kind: "subagent-result-display",
+        id,
+        status,
+        head,
+        fullLineCount: fullLines.length,
+        compactLines,
+        foldedLineCount: Math.max(0, rest.length - compactLines.length),
+    };
+}
+
+function subagentResultText(body: string) {
+    return {
+        content: [{ type: "text" as const, text: body }],
+        details: buildSubagentResultDisplayDetails(body),
+    };
+}
+
+function themed(theme: unknown, color: string, value: string): string {
+    const fg = (theme as { fg?: (color: string, text: string) => string })?.fg;
+    return typeof fg === "function" ? fg(color, value) : value;
+}
+
+function wrapLineToVisibleWidth(line: string, width: number): string[] {
+    const str = String(line ?? "");
+    const max = Math.max(1, Number(width) || 80);
+    if (truncateToVisibleWidth(str, max) === str) return [str];
+
+    const out: string[] = [];
+    let current = "";
+    let visible = 0;
+    let i = 0;
+    while (i < str.length) {
+        if (str[i] === "\u001b" || str[i] === "\u009b") {
+            const match = str.slice(i).match(/^[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))/);
+            if (match) {
+                current += match[0];
+                i += match[0].length;
+                continue;
+            }
+        }
+        if (str[i] === "<") {
+            const close = str.indexOf(">", i);
+            if (close !== -1) {
+                const tag = str.slice(i, close + 1);
+                if (/^<\/?[a-zA-Z][\w-]*>$/.test(tag) || tag === "</>") {
+                    current += tag;
+                    i = close + 1;
+                    continue;
+                }
+            }
+        }
+        if (visible >= max) {
+            out.push(current);
+            current = "";
+            visible = 0;
+        }
+        current += str[i];
+        visible += 1;
+        i += 1;
+    }
+    out.push(current);
+    return out;
+}
+
+function renderLines(lines: string[], mode: "truncate" | "wrap" = "truncate") {
+    return {
+        render(width: number = 80) {
+            return mode === "wrap"
+                ? lines.flatMap((line) => wrapLineToVisibleWidth(line, width))
+                : lines.map((line) => truncateToVisibleWidth(line, width));
+        },
+        invalidate() { /* stateless */ },
+    };
+}
+
+export function renderSubagentResultDisplay(result: unknown, options: unknown = {}, theme: unknown = {}) {
+    const fullText = resultTextContent(result);
+    const details = ((result as { details?: unknown })?.details as ReturnType<typeof buildSubagentResultDisplayDetails> | undefined)
+        ?? buildSubagentResultDisplayDetails(fullText);
+    const expanded = (options as { expanded?: boolean })?.expanded === true;
+    const status = details.status ?? "result";
+    const statusText = themed(theme, displayThemeColor(status), status);
+    const meta = [details.id, `${details.fullLineCount} lines`].filter(Boolean).join(" · ");
+
+    if (expanded) {
+        return renderLines([
+            `${themed(theme, "accent", "subagent_result")} ${statusText}${meta ? themed(theme, "dim", ` · ${meta}`) : ""}`,
+            themed(theme, "dim", "Full displayed result. Click or collapse to fold."),
+            "",
+            ...fullText.split(/\r?\n/),
+        ], "wrap");
+    }
+
+    const folded = details.foldedLineCount > 0
+        ? themed(theme, "dim", `Folded ${details.foldedLineCount} display lines. Click or expand for full result. Model payload unchanged.`)
+        : themed(theme, "dim", "Compact result. Expand for full display if needed.");
+    return renderLines([
+        `${themed(theme, "accent", "subagent_result")} ${statusText}${meta ? themed(theme, "dim", ` · ${meta}`) : ""}`,
+        details.head,
+        "",
+        themed(theme, "dim", "preview"),
+        ...details.compactLines,
+        folded,
+    ]);
+}
+
+function displayThemeColor(status: string): string {
+    const color = statusThemeColor(status);
+    return color === "danger" ? "error" : color;
+}
 
 /** A registered-tool definition as `pi.registerTool` accepts it. */
 type ToolDefinition = Parameters<ExtensionAPI["registerTool"]>[0];
@@ -171,6 +320,9 @@ export function subagentResultTool(Type: TypeModule): ToolDefinition {
         parameters: Type.Object({
             id: Type.String({ description: "Run id from subagent_spawn." }),
         }),
+        renderResult(result: unknown, options: unknown, theme: unknown) {
+            return renderSubagentResultDisplay(result, options, theme);
+        },
         async execute(_id: string, params: unknown) {
             const p = params as { id: string };
             const meta = readMeta(p.id);
@@ -190,21 +342,21 @@ export function subagentResultTool(Type: TypeModule): ToolDefinition {
                     const rawTail = tailLog(p.id, 40);
                     const body = `${head}\n${formatOrphanedResult(r, rawTail)}`;
                     const healthLine = formatHealthDiagnosticLine(observeMetaHealth(meta));
-                    return text(appendHealthDiagnostic(body, healthLine));
+                    return subagentResultText(appendHealthDiagnostic(body, healthLine));
                 }
-                return text(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`);
+                return subagentResultText(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`);
             }
             // Lifecycle-aware body (complete-stream authority + diagnostics).
             // Lost runs go through formatLostResult inside formatSubagentResult (#65).
             const body = buildSubagentResultText(p.id);
             if (body === null) {
                 // Defensive: status race between effectiveStatus and body assembly.
-                return text(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`);
+                return subagentResultText(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`);
             }
             // Append degraded/lost health facts when present; completed/failed
             // happy paths stay quiet when observation is non-actionable.
             const healthLine = formatHealthDiagnosticLine(observeMetaHealth(meta));
-            return text(appendHealthDiagnostic(body, healthLine));
+            return subagentResultText(appendHealthDiagnostic(body, healthLine));
         },
     } as ToolDefinition;
 }
