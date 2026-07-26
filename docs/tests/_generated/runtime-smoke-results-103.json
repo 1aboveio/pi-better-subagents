@@ -17,6 +17,6 @@
       "observed": "SMOKE PASS (in-scope #103): multi-url/no-pushurl read+sync; push reached both urls; stale url+pushurl empty; model.urls.length=2. Does not claim push-only remote or source-read-failure abort (#109)."
     }
   ],
-  "headSha": "PLACEHOLDER_PRE_STAMP",
+  "headSha": "0a510f7bbb1d2d995571232bc32f567258a42f9d",
   "deferredTo": "#109"
 }
