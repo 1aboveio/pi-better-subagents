@@ -305,13 +305,13 @@ describe("navigator detail view", () => {
             },
         });
         await Promise.resolve();
-        assert.ok(o.lines().some((l) => l.includes("alpha") && l.startsWith("> ")));
+        assert.ok(o.lines().some((l) => l.includes("alpha") && l.startsWith("›  ")));
         o.press("<enter>");
         const lines = o.lines();
         assert.ok(lines.some((l) => /alpha/i.test(l)), `detail should name the run: ${JSON.stringify(lines)}`);
         assert.ok(lines.some((l) => /running/i.test(l)));
         assert.ok(lines.some((l) => /alpha out/.test(l)));
-        assert.ok(!lines.some((l) => l.startsWith("> ")), "list selection marker must not appear in detail");
+        assert.ok(!lines.some((l) => l.startsWith("›  ")), "list selection marker must not appear in detail");
         assert.equal(o.timers.activeCount(), 1, "detail opens a refresh timer");
         assert.equal([...o.timers.intervals.values()][0].ms, DETAIL_TICK_MS);
     });
@@ -424,7 +424,7 @@ describe("navigator detail view", () => {
         o.press("<left>");
         assert.equal(o.timers.activeCount(), 0, "back must clear the detail timer");
         const lines = o.lines();
-        assert.ok(lines.some((l) => l.startsWith("> ") && l.includes("beta")), "selection restored on the viewed run");
+        assert.ok(lines.some((l) => l.startsWith("›  ") && l.includes("beta")), "selection restored on the viewed run");
         assert.ok(lines.some((l) => l.includes("alpha")));
         assert.equal(o.doneCalls.length, 0, "back must not close the overlay");
     });
@@ -449,7 +449,7 @@ describe("navigator detail view", () => {
         o.press("<enter>");
         o.press("<left>");
         const lines = o.lines();
-        assert.ok(lines.some((l) => l.startsWith("> ") && l.includes("beta")), "beta remains selected after list refresh");
+        assert.ok(lines.some((l) => l.startsWith("›  ") && l.includes("beta")), "beta remains selected after list refresh");
         assert.ok(!lines.some((l) => l.includes("alpha")), "stale row dropped by getRows");
     });
 

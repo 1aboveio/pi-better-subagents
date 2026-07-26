@@ -26,6 +26,7 @@ export {
     applyNavigatorRows,
     formatNavigatorRowText,
     buildNavigatorLines,
+    navigatorSectionLabel,
     createNavigatorOverlayComponent,
     createNavigatorOverlayFactory,
     showNavigator,

@@ -301,7 +301,7 @@ describe("navigator hardening: selection stability", () => {
         component.handleInput("x");
         const lines = component.render(80).map(stripStyle);
         assert.ok(!lines.some((l) => l.includes("beta")), "dismissed run gone from list");
-        const selected = lines.find((l) => l.startsWith("> "));
+        const selected = lines.find((l) => l.startsWith("›  "));
         assert.ok(selected, "a row remains selected after dismiss");
         assert.ok(/alpha|gamma/.test(selected), `selection clamped to a remaining run, got: ${selected}`);
         // No throw / no empty selection marker on a missing row.
@@ -343,7 +343,7 @@ describe("navigator hardening: selection stability", () => {
         component.handleInput("<left>");
         assert.equal(timers.activeCount(), 0);
         const lines = component.render(80).map(stripStyle);
-        assert.ok(lines.some((l) => l.startsWith("> ") && l.includes("beta")), "beta still selected after refresh+reorder");
+        assert.ok(lines.some((l) => l.startsWith("›  ") && l.includes("beta")), "beta still selected after refresh+reorder");
     });
 });
 
