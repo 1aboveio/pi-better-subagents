@@ -1,0 +1,1 @@
+rebase onto origin/main 72abc46 after #109/#78/#86 advanced main; resolve index.ts/lifecycle.ts/tools.ts conflicts conservatively — keep main finalization/lifecycle architecture, preserve #65 exactly-once recovery + formatOrphaned/formatLost diagnostics
