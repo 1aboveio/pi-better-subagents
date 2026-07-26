@@ -190,6 +190,7 @@ function installTimerSpies() {
 function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
     const handlers = {};
     const statusCalls = [];
+    const widgetCalls = [];
     let overlayComponent;
     let editor;
     let resolveOverlay;
@@ -198,7 +199,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
 
     const ui = {
         setStatus(k, v) { statusCalls.push([k, v]); },
-        setWidget() {},
+        setWidget(k, v) { widgetCalls.push([k, v]); },
         notify() {},
         factory: undefined,
         getEditorComponent() { return this.factory; },
@@ -237,6 +238,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
     return {
         handlers,
         statusCalls,
+        widgetCalls,
         ui,
         ctx,
         get setEditorCount() { return setEditorCount; },
@@ -277,6 +279,12 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
         lastStatus(key) {
             for (let i = statusCalls.length - 1; i >= 0; i--) {
                 if (statusCalls[i][0] === key) return statusCalls[i][1];
+            }
+            return Symbol.for("missing");
+        },
+        lastWidget(key) {
+            for (let i = widgetCalls.length - 1; i >= 0; i--) {
+                if (widgetCalls[i][0] === key) return widgetCalls[i][1];
             }
             return Symbol.for("missing");
         },
@@ -344,10 +352,16 @@ describe("registered extension path: session_start reload cleanup", () => {
         assert.equal(nav.setEditorCount, 1, "first session_start installs editor once");
         assert.equal(nav.ui.factory?.__piBetterSubagentsNavigatorFactory, true, "factory is marked");
         const footerAfterStart = nav.lastStatus("subagents-nav");
+        const widgetAfterStart = nav.lastWidget("subagents");
         assert.equal(
             footerAfterStart,
             `← subagents · ${registry.navigatorVisibleCount(registry.listMetas(), THIS_PID)}`,
             "first session_start publishes count footer",
+        );
+        assert.deepEqual(
+            widgetAfterStart,
+            [`← subagents · ${registry.navigatorVisibleCount(registry.listMetas(), THIS_PID)}`],
+            "first session_start publishes fallback navigator widget for terminal visible runs",
         );
 
         // 2) Open via the registered empty-editor Left path.
@@ -367,6 +381,7 @@ describe("registered extension path: session_start reload cleanup", () => {
         assert.match(String(confirmAfterArm), /reload-job|x again/i);
 
         const statusLenBeforeReload = nav.statusCalls.length;
+        const widgetLenBeforeReload = nav.widgetCalls.length;
         const editorBefore = nav.ui.factory;
 
         // 4) Fire registered session_start again (reload / session switch).
@@ -394,14 +409,24 @@ describe("registered extension path: session_start reload cleanup", () => {
 
         // 5c) Footer count is republished after lastNavigatorHint reset.
         const footerAfterReload = nav.lastStatus("subagents-nav");
+        const widgetAfterReload = nav.lastWidget("subagents");
         assert.equal(
             footerAfterReload,
             `← subagents · ${registry.navigatorVisibleCount(registry.listMetas(), THIS_PID)}`,
             "reload republishes navigator count footer",
         );
+        assert.deepEqual(
+            widgetAfterReload,
+            [`← subagents · ${registry.navigatorVisibleCount(registry.listMetas(), THIS_PID)}`],
+            "reload republishes fallback navigator widget",
+        );
         assert.ok(
             nav.statusCalls.slice(statusLenBeforeReload).some((c) => c[0] === "subagents-nav" && typeof c[1] === "string"),
             "reload path must re-invoke setStatus for the count footer",
+        );
+        assert.ok(
+            nav.widgetCalls.slice(widgetLenBeforeReload).some((c) => c[0] === "subagents" && Array.isArray(c[1]) && c[1][0].startsWith("← subagents")),
+            "reload path must re-invoke setWidget for the fallback navigator hint",
         );
 
         // Seed still visible (reload is non-mutating for runs).
