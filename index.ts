@@ -202,11 +202,19 @@ function applyWidget(linesOrClear: string[] | typeof WIDGET_CLEAR): void {
 }
 
 /**
- * Observe health for a widget row. Best-effort; never throws into the tick.
+ * Observe health for a widget/navigator row. Best-effort; never throws into the tick.
  * Full log parse is gated by size/mtime so the 1 Hz frame does not re-read and
  * reparse every complete log when nothing changed (#67).
+ *
+ * When `displayStatus` is omitted, uses durable `meta.status` (widget path).
+ * Navigator detail/list pass `effectiveStatus(meta)` so process liveness cannot
+ * say "supervised" while the UI shows transient "exited" (#69).
  */
-function observeWidgetHealth(meta: RunMeta, now: number): HealthObservation | undefined {
+function observeWidgetHealth(
+    meta: RunMeta,
+    now: number,
+    displayStatus?: RunMeta["status"] | "exited",
+): HealthObservation | undefined {
     try {
         const { size: logSize, mtimeMs } = logStatOf(meta.id);
         const cached = healthLogCache.get(meta.id);
@@ -223,8 +231,11 @@ function observeWidgetHealth(meta: RunMeta, now: number): HealthObservation | un
                 mtimeMs,
             });
         }
+        const status = displayStatus ?? meta.status;
         return observeRunHealth({
-            status: meta.status,
+            // Prefer caller-supplied effective/display status (navigator detail)
+            // so liveness cannot say "supervised" while the UI shows "exited".
+            status,
             now,
             facts: resolved.facts as ChildEventFacts,
             rawLog: resolved.rawLog as RawLogDiagnostic,
@@ -478,13 +489,39 @@ let lastNavigatorHint: string | null | undefined;
 /** Active navigator overlay dispose hook (clears detail timers on teardown). */
 let activeNavigatorDispose: (() => void) | undefined;
 
+/**
+ * Observe health for a navigator row/detail (#69). Reuses the size/mtime-gated
+ * log cache from the widget path so the overlay refresh does not reparse every
+ * complete log on each paint. Passes effective/display status so detail
+ * liveness matches the status line for legacy dead-running metadata.
+ * Best-effort; never throws into the TUI.
+ */
+function observeNavigatorHealth(meta: RunMeta, now: number = Date.now()): HealthObservation | undefined {
+    return observeWidgetHealth(meta, now, effectiveStatus(meta));
+}
+
 /** Rows for the overlay: visible current-parent runs, newest first (#44 seam). */
 function navigatorRows() {
+    const now = Date.now();
     return buildNavigatorRows(navigatorVisibleRuns(listMetas()), {
         effectiveStatus,
         shortModel,
         fmtElapsed,
-        spendFor: (m: RunMeta) => fmtSpend(parseRun(m.id).usage),
+        now,
+        spendFor: (m: RunMeta) => {
+            const snap = spendFor(m.id, now);
+            return fmtSpend(snap.usage);
+        },
+        toolFor: (m: RunMeta) => {
+            const snap = spendFor(m.id, now);
+            return snap.tool ?? "";
+        },
+        // Effort is shown when available on metadata; Pi does not always expose it.
+        effortFor: (m: RunMeta) => {
+            const any = m as RunMeta & { effort?: string; modelEffort?: string };
+            return any.effort ?? any.modelEffort;
+        },
+        healthFor: (m: RunMeta) => observeNavigatorHealth(m, now),
     });
 }
 
@@ -497,8 +534,9 @@ function navigatorRunningCount(): number {
     return navigatorRunningRuns().length;
 }
 
-/** Live detail snapshot for one run (registry + log parse). */
+/** Live detail snapshot for one run (registry + log parse + health). */
 function navigatorDetail(id: string) {
+    const now = Date.now();
     return buildNavigatorDetail(id, {
         readMeta,
         effectiveStatus,
@@ -506,6 +544,12 @@ function navigatorDetail(id: string) {
         shortModel,
         fmtElapsed,
         fmtSpend,
+        now,
+        effortFor: (m: RunMeta) => {
+            const any = m as RunMeta & { effort?: string; modelEffort?: string };
+            return any.effort ?? any.modelEffort;
+        },
+        healthFor: (m: RunMeta) => observeNavigatorHealth(m, now),
     });
 }
 

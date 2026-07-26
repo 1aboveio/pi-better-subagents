@@ -10,7 +10,7 @@
  *   key delegates. The wrapper composes with any existing editor component and
  *   repeated installs never stack duplicate wrappers.
  * - Overlay: visible current-parent runs newest first (running AND terminal),
- *   rows show name-or-ID · effective status · model · elapsed · spend, Up/Down
+ *   rows show name-or-ID · model · elapsed · spend · status (+ health), Up/Down
  *   move the selection (clamped), Escape closes, overlay requested with
  *   { overlay: true } (pi focuses overlays on show).
  * - Non-TUI: the navigator wiring is unavailable without a UI (print/RPC).
@@ -552,7 +552,7 @@ describe("navigator rows", () => {
 
     // @covers navigator.overlay
     // @level unit
-    it("each row carries name-or-ID, effective status, model, elapsed, and spend", () => {
+    it("each row carries name-or-ID, model, elapsed, spend, and durable status", () => {
         const rows = buildNavigatorRows([
             meta({ id: "sa_t45_named", name: "reviewer", model: "xai/grok-4.5", startedAt: 90_000 }),
             meta({ id: "sa_t45_unnamed", startedAt: 0, endedAt: 61_000 }),
@@ -562,6 +562,7 @@ describe("navigator rows", () => {
         assert.equal(rows[0].model, "grok-4.5");
         assert.equal(rows[0].elapsed, "10s");
         assert.equal(rows[0].spend, "1.2k tok (↑800 ↓400) · $0.01");
+        assert.deepEqual(rows[0].healthFacts, [], "healthy/quiet default has no health facts");
         assert.equal(rows[1].name, undefined, "unnamed run falls back to id at render time");
         assert.equal(rows[1].elapsed, "1m 01s", "terminal runs freeze elapsed at endedAt");
     });
@@ -648,9 +649,11 @@ describe("navigator overlay component", () => {
         const plain = lines.map((l) => l.replace(/<\/?[a-z]*>/g, ""));
         assert.ok(plain[0].includes("Subagents · 2"));
         assert.ok(plain[1].startsWith("> "), "first row selected by default");
-        assert.ok(plain[1].includes("newest · running · grok-4.5 · 5s"));
+        // #69 scan order: name · model · elapsed · status (status last).
+        assert.ok(plain[1].includes("newest · grok-4.5 · 5s · running"), plain[1]);
         assert.ok(plain[2].startsWith("  "));
-        assert.ok(plain[2].includes("sa_2 · completed · ? · 1m 01s · 1.2k tok"), "unnamed run shows its id and spend");
+        assert.ok(plain[2].includes("sa_2 · ? · 1m 01s · 1.2k tok") && plain[2].includes("completed"),
+            `unnamed run shows its id, spend, status last: ${plain[2]}`);
         assert.ok(plain[3].includes("esc"), "help line advertises escape");
         assert.ok(plain[3].includes("x stop"), "running selection labels x as stop, not close");
         assert.ok(!plain[3].includes("x close"), "x action must not collide with esc close wording");

@@ -458,8 +458,11 @@ export interface ModelObservation {
     longModelCall?: { startedAt?: number; ageMs?: number };
 }
 
+/** Durable run status plus transient display `exited` (dead pid, still `running` on disk). */
+export type ObservationStatus = RunStatus | "exited";
+
 export interface HealthObservation {
-    status: RunStatus;
+    status: ObservationStatus;
     process: ProcessObservation;
     activity: ActivityHealth;
     lastMeaningfulAt?: number;
@@ -474,7 +477,8 @@ export interface HealthObservation {
 }
 
 export interface ObserveRunHealthInput {
-    status: RunStatus;
+    /** Prefer effective/display status so liveness matches what the UI shows. */
+    status: ObservationStatus;
     now: number;
     facts: ChildEventFacts;
     rawLog?: RawLogDiagnostic;
@@ -484,10 +488,12 @@ export interface ObserveRunHealthInput {
     startedAt?: number;
 }
 
-function processLiveness(status: RunStatus, supervised?: boolean): ProcessLiveness {
+function processLiveness(status: ObservationStatus, supervised?: boolean): ProcessLiveness {
     if (status === "orphaned") return "orphaned";
     if (status === "lost") return "lost";
-    if (status === "completed" || status === "failed" || status === "killed") return "terminal";
+    if (status === "completed" || status === "failed" || status === "killed" || status === "exited") {
+        return "terminal";
+    }
     if (status === "running") return supervised === false ? "unknown" : "supervised";
     return "unknown";
 }
@@ -558,6 +564,7 @@ export function observeRunHealth(input: ObserveRunHealthInput): HealthObservatio
         || input.status === "completed"
         || input.status === "killed"
         || input.status === "lost"
+        || input.status === "exited"
     ) {
         // Terminal runs are not residual-stale workers.
         if (meaningfulAgeMs !== undefined && meaningfulAgeMs >= thresholds.quietMs) activity = "quiet";
