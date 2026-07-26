@@ -19,7 +19,7 @@ import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@earendil-works/pi-ai";
 import { spawnDetached, type SpawnResult } from "./spawn.ts";
 import { parseRun, type Usage } from "./parse.ts";
-import { classifyChildExit } from "./lifecycle.ts";
+import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { maybeBuildSandboxCommand } from "./sandbox.ts";
@@ -36,7 +36,6 @@ import {
     listMetas,
     effectiveStatus,
     ownedByThisParent,
-    canExitFinalize,
     navigatorVisibleRuns,
     navigatorVisibleCount,
     dismissRun,
@@ -61,7 +60,6 @@ import {
     formatCapacityRejectMessage,
     getSharedCapacityGate,
 } from "./capacity.mjs";
-import { formatCallbackTrigger, formatCallbackQuiet, buildCompletionDelivery } from "./completion.ts";
 import {
     text,
     subagentListTool,
@@ -421,52 +419,23 @@ function resolvePiBinary(): string {
 }
 
 /**
- * Finalize a run once its child exits. Idempotent: a run already marked
- * terminal is left alone. Notifies the foreground non-intrusively.
+ * Finalize a run once its child exits. Host-facing wrapper around the
+ * first-party finalizer (finalization.ts) so tests can exercise the durable
+ * path without importing the pi package.
  */
 function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: number | null): void {
-    const meta = readMeta(id);
-    // Coherent child-exit evidence supersedes provisional orphaned/lost
-    // reconciliation (a health tick can observe the just-exited pid before
-    // this close handler runs), but never overwrites a true terminal record:
-    // finalization stays idempotent and a deliberate kill stays killed.
-    if (!meta || !canExitFinalize(meta.status)) return;
-    const r = parseRun(id);
-    const outcome = classifyChildExit(code, r);
-    meta.status = outcome.status;
-    if (outcome.incomplete) meta.failureReason = "incomplete-stream";
-    meta.exitCode = code;
-    meta.endedAt = Date.now();
-    writeMeta(meta);
-
-    const label = meta.name ? `${meta.name} (${id})` : id;
-    const verdict = outcome.verdict;
-    const el = fmtElapsed(meta.endedAt - meta.startedAt);
-    const spend = fmtSpend(r.usage);
-    const stat = `${el}${spend ? ` · ${spend}` : ""}`;
-    const tools = r.toolCalls.length ? r.toolCalls.join(", ") : undefined;
-
-    // A finished run is no longer in the widget; redraw (and stop the ticker if
-    // it was the last one).
-    renderWidget();
-
-    // Best-effort human toast. ctx may be stale by now; never let it throw.
-    try { ctx.ui.notify(`Subagent ${label} ${verdict} · ${stat}`, meta.status === "completed" ? "info" : "warning"); } catch { /* ignore */ }
-
-    const callback = meta.callback !== false; // default: trigger completion
-    // buildCompletionDelivery is the single place sendMessage content/options are
-    // assembled. resultText is accepted here so callers/tests can pass it without
-    // breaking, but it is NEVER put into content — the result lives in subagent_result.
-    const delivery = buildCompletionDelivery({
-        id, label, verdict, stat, tools,
-        callback,
-        incomplete: outcome.incomplete,
-        resultText: r.finalText || r.lastActivity || "",
+    // Host-facing wrapper around first-party finalizer (finalization.ts).
+    // Coherent child-exit evidence may supersede provisional orphaned/lost
+    // reconciliation; finalization.ts enforces canExitFinalize + lifecycle authority.
+    finalizeRunCore(id, code, {
+        renderWidget,
+        notify: (message, level) => {
+            try { ctx.ui.notify(message, level); } catch { /* ignore */ }
+        },
+        sendMessage: (message, options) => {
+            pi.sendMessage(message, options);
+        },
     });
-    pi.sendMessage(
-        { customType: "subagent-complete", content: delivery.content, display: true },
-        delivery.options,
-    );
 }
 
 export default function (pi: ExtensionAPI) {
