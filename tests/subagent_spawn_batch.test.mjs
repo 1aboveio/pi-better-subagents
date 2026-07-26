@@ -39,6 +39,7 @@ describe("mergeJobOptions", () => {
             sandbox: true,
             callback: true,
             cwd: "/shared",
+            git_clone_workspace: true,
             approve: false,
             allow_nested: false,
             exclude_tools: "web_fetch",
@@ -53,6 +54,7 @@ describe("mergeJobOptions", () => {
             sandbox: false,
             callback: false,
             cwd: "/job",
+            git_clone_workspace: false,
             approve: true,
             allow_nested: true,
             exclude_tools: "bash",
@@ -69,6 +71,7 @@ describe("mergeJobOptions", () => {
         assert.equal(merged.sandbox, false);
         assert.equal(merged.callback, false);
         assert.equal(merged.cwd, "/job");
+        assert.equal(merged.git_clone_workspace, false, "per-job git_clone_workspace must override shared");
         assert.equal(merged.approve, true);
         assert.equal(merged.allow_nested, true);
         assert.equal(merged.exclude_tools, "bash");
@@ -76,7 +79,7 @@ describe("mergeJobOptions", () => {
     });
 
     it("shared options fill in missing per-job values, preserving false booleans", () => {
-        const shared = { sandbox: true, callback: false, clean: false };
+        const shared = { sandbox: true, callback: false, clean: false, git_clone_workspace: true };
         const job = { prompt: "x" };
 
         const merged = mergeJobOptions(shared, job);
@@ -84,17 +87,59 @@ describe("mergeJobOptions", () => {
         assert.equal(merged.sandbox, true);
         assert.equal(merged.callback, false);
         assert.equal(merged.clean, false);
+        assert.equal(merged.git_clone_workspace, true, "shared git_clone_workspace must forward when job omits it");
         assert.equal(merged.model, undefined);
     });
 
     it("a fully empty shared object leaves job values untouched", () => {
-        const job = { prompt: "x", name: "n", sandbox: false };
+        const job = { prompt: "x", name: "n", sandbox: false, git_clone_workspace: true };
         const merged = mergeJobOptions({}, job);
 
         assert.equal(merged.prompt, "x");
         assert.equal(merged.name, "n");
         assert.equal(merged.sandbox, false);
+        assert.equal(merged.git_clone_workspace, true, "per-job git_clone_workspace must survive empty shared");
         assert.equal(merged.model, undefined);
+    });
+
+    // @fails-without-fix subagent-spawn-batch.option-merge
+    // @covers subagent-spawn-batch.option-merge
+    // @level unit
+    // Class: batch-clone-option-forwarding — shared + per-job must reach spawnSubagentRun.
+    it("forwards git_clone_workspace from shared and per-job inputs (same-semantics contract)", () => {
+        // Shared-only: job omits the field → shared true must appear on the merge result
+        // that index.ts spreads into spawnSubagentRun.
+        const fromShared = mergeJobOptions({ git_clone_workspace: true, sandbox: true }, { prompt: "shared-only" });
+        assert.equal(fromShared.git_clone_workspace, true);
+        assert.notEqual(
+            fromShared.git_clone_workspace,
+            undefined,
+            "shared git_clone_workspace must not be dropped by mergeJobOptions",
+        );
+
+        // Per-job-only: empty shared → job true must appear.
+        const fromJob = mergeJobOptions({}, { prompt: "job-only", git_clone_workspace: true });
+        assert.equal(fromJob.git_clone_workspace, true);
+
+        // Per-job false must override shared true (preserve false booleans).
+        const overrideFalse = mergeJobOptions(
+            { git_clone_workspace: true },
+            { prompt: "override", git_clone_workspace: false },
+        );
+        assert.equal(overrideFalse.git_clone_workspace, false);
+
+        // Neither set → undefined (spawn path treats as not requested).
+        const neither = mergeJobOptions({ sandbox: true }, { prompt: "neither" });
+        assert.equal(neither.git_clone_workspace, undefined);
+
+        // Production merge must literally name the field (guards against a future
+        // rewrite that spreads a whitelist without this key).
+        const batchSource = readFileSync(resolve(__dirname, "..", "batch.mjs"), "utf8");
+        assert.match(
+            batchSource,
+            /git_clone_workspace:\s*job\.git_clone_workspace\s*\?\?\s*shared\?\.git_clone_workspace/,
+            "mergeJobOptions must forward git_clone_workspace from job ?? shared",
+        );
     });
 });
 
