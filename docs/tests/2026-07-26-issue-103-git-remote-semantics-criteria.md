@@ -1,6 +1,6 @@
 # Test Criteria — Issue #103: Complete Git remote semantics
 
-Source: https://github.com/1aboveio/pi-better-subagents/issues/103  
+Source: https://github.com/1aboveio/pi-better-subagents/issues/103
 Related: blocks #78 / PR #89 (`git-remote-preservation` theme)
 
 ## Scope
