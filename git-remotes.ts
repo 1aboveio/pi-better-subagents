@@ -1,5 +1,6 @@
 /**
- * Complete first-class Git remote semantics for disposable clone workspaces.
+ * First-class Git remote semantics for disposable clone workspaces under
+ * normal fetch-URL + pushurl topologies (issue #103).
  *
  * Invariant (`git-remote-preservation`, issue #103): disposable clone
  * preparation must preserve every source remote name, **every** configured
@@ -14,6 +15,10 @@
  *
  * Values are read from null-delimited `git config` output rather than
  * `git remote -v` line parsing, which drops any URL containing spaces.
+ *
+ * Deferred to issue #109 (accepted descope from #103 / PR #105):
+ * - push-only remotes (zero `remote.<name>.url`, one or more pushurls)
+ * - source remote read-failure must abort before mutating the target
  *
  * Consumed by disposable clone workspace preparation (issue #78 / PR #89).
  */
@@ -104,9 +109,9 @@ export function readGitRemotes(dir: string): GitRemote[] {
 
     const remotes: GitRemote[] = [];
     for (const [name, urls] of byName.entries()) {
-        // Prefer configured fetch URLs. Unusual but legal: a remote with only
-        // pushurl keys and no url key — expose the first pushurl as urls[0] so
-        // the remote remains addressable, and keep the full push set in pushUrls.
+        // Prefer configured fetch URLs. Push-only remotes (pushurl keys only,
+        // no url key) are deferred to #109; the interim fallback below is not
+        // part of the #103 contract and must not be claimed as push-only support.
         const fetchUrls =
             urls.fetch.length > 0
                 ? [...urls.fetch]
@@ -126,9 +131,13 @@ export function readGitRemotes(dir: string): GitRemote[] {
 }
 
 /**
- * Make `targetDir`'s remotes match `sourceDir`'s complete remote contract:
- * names, every fetch URL, and every configured push URL. Removes stale remotes
- * that exist only on the target (typical after a path-style clone).
+ * Make `targetDir`'s remotes match `sourceDir`'s #103 remote contract for
+ * normal fetch-URL + pushurl topologies: names, every fetch URL, and every
+ * configured push URL. Removes stale remotes that exist only on the target
+ * (typical after a path-style clone).
+ *
+ * Source read-failure non-mutation (distinguish unreadable source from a valid
+ * empty remote set) is deferred to #109.
  */
 export function syncGitRemotes(sourceDir: string, targetDir: string): void {
     const sourceRemotes = readGitRemotes(sourceDir);

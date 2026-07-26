@@ -1,21 +1,22 @@
 {
   "unit": "#103",
-  "headNote": "production multi-url class-complete fix HEAD (stamp commit follows)",
+  "headNote": "#103 scope = normal fetch-URL + pushurl topologies; push-only remotes and source-read-failure non-mutation deferred to #109. Smoke proves multi-url/no-pushurl happy path only (not the descoped edges). headSha stamped after contract-descope commit.",
   "results": [
     {
       "surface": "git_remotes.read",
       "kind": "library",
       "status": "pass",
       "command": "node --experimental-strip-types -e '<inline multi-url/no-pushurl read+sync+push smoke>'",
-      "observed": "SMOKE PASS: multi-url/no-pushurl read+sync; push reached both urls; stale url+pushurl empty; model.urls.length=2"
+      "observed": "SMOKE PASS (in-scope #103): multi-url/no-pushurl read+sync; push reached both urls; stale url+pushurl empty; model.urls.length=2. Does not claim push-only remote or source-read-failure abort (#109)."
     },
     {
       "surface": "git_remotes.sync",
       "kind": "library",
       "status": "pass",
       "command": "node --experimental-strip-types -e '<inline multi-url/no-pushurl read+sync+push smoke>'",
-      "observed": "SMOKE PASS: multi-url/no-pushurl read+sync; push reached both urls; stale url+pushurl empty; model.urls.length=2"
+      "observed": "SMOKE PASS (in-scope #103): multi-url/no-pushurl read+sync; push reached both urls; stale url+pushurl empty; model.urls.length=2. Does not claim push-only remote or source-read-failure abort (#109)."
     }
   ],
-  "headSha": "62b856e5457c8a116eed1eff926de2be2939d863"
+  "headSha": "PENDING_STAMP",
+  "deferredTo": "#109"
 }

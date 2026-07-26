@@ -5,9 +5,27 @@ Related: blocks #78 / PR #89 (`git-remote-preservation` theme)
 
 ## Scope
 
-Reusable library module that reads and syncs complete first-class Git remote
-configuration for disposable clone workspaces. Out of scope: full disposable
-clone preparation (issue #78), sandboxing, merge queue.
+Reusable library module that reads and syncs first-class Git remote
+configuration for disposable clone workspaces under **normal fetch-URL +
+pushurl topologies** (one or more `remote.<name>.url`, zero or more
+`remote.<name>.pushurl`). Out of scope: full disposable clone preparation
+(issue #78), sandboxing, merge queue, and the edge cases deferred to #109
+(see below).
+
+## Deferred to #109 (accepted descope from #103)
+
+Human breaker descope after the class-complete round on PR #105. These are
+**not** acceptance criteria for #103 and must not be claimed as covered here:
+
+1. **Push-only remotes** — zero `remote.<name>.url` entries with one or more
+   `remote.<name>.pushurl` entries (do not invent a fetch URL; preserve
+   push-only topology).
+2. **Source remote read-failure safety** — if source remote config cannot be
+   read (missing/unreadable/not a Git repo), `syncGitRemotes` must abort
+   **before** mutating the target. Returning `[]` must not conflate operational
+   failure with a valid source that has no remotes.
+
+Tracked: https://github.com/1aboveio/pi-better-subagents/issues/109
 
 ## Surfaces
 
@@ -43,6 +61,10 @@ Class-complete adjacent members (all must hold):
 6. Whitespace local-path URLs — structured config read + sync
 7. Regex-metacharacter local paths in url and pushurl — clear via unset-all, never regex --delete
 8. Stale multi-valued url/pushurl sets on target — complete-set clear then ordered rebuild
+
+Not in this class for #103 (deferred to #109):
+- Push-only remote (urls empty, pushUrls non-empty)
+- Source read failure must not mutate target remotes
 
 ## Mock / fake policy
 
