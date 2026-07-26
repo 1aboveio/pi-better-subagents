@@ -26,13 +26,14 @@
  */
 export function formatCallbackTrigger(p) {
     const tools = p.tools ? ` ·${p.tools.replace(/\n/, " ")}` : "";
+    const lifecycle = p.lifecycleClassification ? ` · lifecycle ${p.lifecycleClassification}` : "";
     const announcement = p.incomplete
-        ? "A background subagent exited unexpectedly before producing a coherent final result."
+        ? "ATTENTION: a background subagent exited unexpectedly before producing a coherent final result."
         : "A background subagent you launched has returned.";
     const instruction = p.incomplete
         ? `Inspect the diagnostic with subagent_result id="${p.id}" before deciding how to continue.`
         : `Ingest this signal and call subagent_result id="${p.id}" to retrieve the actual result, then use/present it as appropriate.`;
-    return `${announcement}\nsubagent: ${p.label} · ${p.verdict} · ${p.stat}${tools}\n\n${instruction}`;
+    return `${announcement}\nsubagent: ${p.label} · ${p.verdict} · ${p.stat}${tools}${lifecycle}\n\n${instruction}`;
 }
 
 /**
@@ -49,12 +50,13 @@ export function formatCallbackTrigger(p) {
  * @param p.stat - Statistics line
  */
 export function formatCallbackQuiet(p) {
+    const lifecycle = p.lifecycleClassification ? ` · lifecycle ${p.lifecycleClassification}` : "";
     if (p.incomplete) {
-        return `Background subagent ${p.label} ended unexpectedly · ${p.verdict} · ${p.stat}. ` +
+        return `ATTENTION: background subagent ${p.label} ended unexpectedly · ${p.verdict} · ${p.stat}${lifecycle}. ` +
             `Diagnostic NOT auto-posted (callback:false). Inspect it with subagent_result id="${p.id}".`;
     }
     return (
-        `Background subagent ${p.label} ${p.verdict} · ${p.stat}. ` +
+        `Background subagent ${p.label} ${p.verdict} · ${p.stat}${lifecycle}. ` +
         `Result NOT auto-posted (callback:false). ` +
         `Read it with subagent_result id="${p.id}" when wanted.`
     );
@@ -86,6 +88,7 @@ export function buildCompletionDelivery(p) {
                 stat: p.stat,
                 tools: p.tools,
                 incomplete: p.incomplete,
+                lifecycleClassification: p.lifecycleClassification,
             }),
             options: { deliverAs: "followUp", triggerTurn: true },
         };
@@ -97,6 +100,7 @@ export function buildCompletionDelivery(p) {
             verdict: p.verdict,
             stat: p.stat,
             incomplete: p.incomplete,
+            lifecycleClassification: p.lifecycleClassification,
         }),
         options: { deliverAs: "nextTurn" },
     };

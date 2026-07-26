@@ -16,8 +16,8 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readMeta, listMetas, effectiveStatus, isFinalResultStatus } from "./registry.ts";
-import { parseRun, tailLog, formatSubagentOutputBody, formatSubagentResultBody } from "./parse.ts";
-import { formatIncompleteResult } from "./lifecycle.ts";
+import { parseRun, tailLog, formatSubagentOutputBody } from "./parse.ts";
+import { buildSubagentResultText } from "./finalization.ts";
 import { stopRun } from "./stop.ts";
 import { fmtElapsed, fmtSpend } from "./widget.ts";
 import {
@@ -136,25 +136,13 @@ export function subagentResultTool(Type: TypeModule): ToolDefinition {
                 }
                 return text(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`);
             }
-            const exit = meta.exitCode === undefined ? "?" : String(meta.exitCode);
-            const r = parseRun(p.id);
-            const el = fmtElapsed((meta.endedAt ?? Date.now()) - meta.startedAt);
-            const spend = fmtSpend(r.usage);
-            const statSeg = ` · ${el}${spend ? ` · ${spend}` : ""}`;
-            const tools = r.toolCalls.length ? ` · tools: ${r.toolCalls.join(", ")}` : "";
-            const diagnostic = st === "lost"
-                ? `\nRun is lost: no related process remains and no coherent terminal result was observed. Best-available artifacts below.`
-                : "";
-            const rawTail = tailLog(p.id, 40);
-            if (meta.failureReason === "incomplete-stream") {
-                return text(`[${p.id} · ${st} · exit ${exit}${statSeg}${tools}]\n${formatIncompleteResult(r, rawTail)}`);
+            // Lifecycle-aware body (complete-stream authority + diagnostics).
+            const body = buildSubagentResultText(p.id);
+            if (body === null) {
+                // Defensive: status race between effectiveStatus and body assembly.
+                return text(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`);
             }
-            return text(formatSubagentResultBody(
-                `[${p.id} · ${st} · exit ${exit}${statSeg}${tools}]${diagnostic}`,
-                r.finalText || undefined,
-                rawTail,
-                r.diagnostics,
-            ));
+            return text(body);
         },
     } as ToolDefinition;
 }
