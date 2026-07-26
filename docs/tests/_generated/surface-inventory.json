@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-26T12:00:00.000Z",
+  "generatedAt": "2026-07-26T14:30:00.000Z",
   "surfaces": [
     {
       "id": "widget.render",
@@ -146,6 +146,20 @@
       "kind": "service",
       "class": "mutation",
       "path": "completion.mjs",
+      "reachable": true
+    },
+    {
+      "id": "health.observation",
+      "kind": "service",
+      "class": "read",
+      "path": "health-observation.ts",
+      "reachable": true
+    },
+    {
+      "id": "health.event-facts",
+      "kind": "service",
+      "class": "read",
+      "path": "health-observation.ts",
       "reachable": true
     },
     {

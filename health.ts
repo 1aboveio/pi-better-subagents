@@ -259,6 +259,24 @@ function psNumber(args: string[]): number | undefined {
     }
 }
 
+// Re-export observation seam so health consumers can import from one module.
+export {
+    DEFAULT_HEALTH_THRESHOLDS,
+    extractChildEventFacts,
+    extractChildEventFactsFromLog,
+    loadHealthThresholdsFromConfig,
+    observeRunHealth,
+    resolveHealthThresholds,
+} from "./health-observation.ts";
+export type {
+    ActivityHealth,
+    ChildEventFacts,
+    HealthObservation,
+    HealthThresholds,
+    ObserveRunHealthInput,
+    RawLogDiagnostic,
+} from "./health-observation.ts";
+
 export const realProcessProbe: ProcessProbe = {
     pidExists: (pid) => processExists(pid),
     startToken: (pid) => linuxStartToken(pid) ?? psStartToken(pid),
