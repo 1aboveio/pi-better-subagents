@@ -274,12 +274,18 @@ export function formatSubagentResult(input: FormatSubagentResultInput): string {
     if (lifecycle.incomplete) {
         return `${head}\n${formatIncompleteResult(run, rawLogTail, lifecycle)}`;
     }
+    // Terminal lost: no coherent exit evidence; surface best-available artifacts
+    // without presenting them as a clean final answer.
+    const lostBanner = status === "lost" || lifecycle.classification === "lost"
+        ? "Run is lost: no related process remains and no coherent terminal result was observed. Best-available artifacts below."
+        : null;
     const body = run.finalText
         || (run.lastActivity
             ? `(no final answer parsed; latest activity)\n${run.lastActivity}`
             : `(no final answer parsed)\n\n--- raw log tail ---\n${rawLogTail}`);
     return [
         head,
+        ...(lostBanner ? [lostBanner] : []),
         formatLifecycleDiagnostics(lifecycle),
         body,
     ].join("\n");

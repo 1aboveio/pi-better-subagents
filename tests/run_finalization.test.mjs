@@ -654,6 +654,110 @@ describe("finalizeRun integration", () => {
     // @covers subagent.run-finalization
     // @level integration
     // @fails-without-fix subagent.run-finalization
+    it("does not let duplicate toolCallId with null final value balance an open tool into clean completion", () => {
+        const id = `sa_finalize_dup_toolcallid_${process.pid}_${Date.now()}`;
+        const messages = [];
+        writeRunLog(id, []);
+        writeFileSync(
+            logPathFor(id),
+            [
+                JSON.stringify({
+                    type: "tool_execution_start",
+                    toolCallId: "call_bash",
+                    toolName: "bash",
+                }),
+                // Grammar-valid but duplicate toolCallId; final JSON value is null.
+                `{"type":"tool_execution_end","toolCallId":"call_bash","toolCallId":null}`,
+                JSON.stringify({
+                    type: "agent_end",
+                    messages: [{ role: "assistant", content: "Final answer" }],
+                }),
+                "",
+            ].join("\n"),
+        );
+        seedRunningMeta(id);
+
+        try {
+            const result = finalizeRun(id, 0, {
+                renderWidget: () => {},
+                notify: () => {},
+                sendMessage: (message, options) => messages.push({ message, options }),
+            });
+
+            assert.equal(result.applied, true);
+            assert.equal(result.outcome?.status, "failed");
+            assert.equal(result.outcome?.incomplete, true);
+            assert.notEqual(result.outcome?.classification, "complete");
+            assert.equal(result.outcome?.diagnostics.sawTerminalEvent, false);
+
+            const persisted = readMeta(id);
+            assert.equal(persisted?.status, "failed");
+            assert.equal(persisted?.failureReason, "incomplete-stream");
+            assert.notEqual(persisted?.lifecycleClassification, "complete");
+
+            assert.match(messages[0].message.content, /ATTENTION/i);
+            assert.doesNotMatch(messages[0].message.content, /lifecycle complete/);
+
+            const rendered = buildSubagentResultText(id);
+            assert.ok(rendered);
+            assert.doesNotMatch(rendered, /lifecycle complete/);
+            assert.match(rendered, /lifecycle incomplete/);
+        } finally {
+            rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
+
+    // @covers subagent.run-finalization
+    // @level integration
+    // @fails-without-fix subagent.run-finalization
+    it("does not let escaped duplicate toolCallId key balance an open tool into clean completion", () => {
+        const id = `sa_finalize_dup_escaped_key_${process.pid}_${Date.now()}`;
+        const messages = [];
+        writeRunLog(id, []);
+        writeFileSync(
+            logPathFor(id),
+            [
+                JSON.stringify({
+                    type: "tool_execution_start",
+                    toolCallId: "call_bash",
+                    toolName: "bash",
+                }),
+                `{"type":"tool_execution_end","toolCallId":"call_bash","toolCall\\u0049d":null}`,
+                JSON.stringify({
+                    type: "agent_end",
+                    messages: [{ role: "assistant", content: "Final answer" }],
+                }),
+                "",
+            ].join("\n"),
+        );
+        seedRunningMeta(id);
+
+        try {
+            const result = finalizeRun(id, 0, {
+                renderWidget: () => {},
+                notify: () => {},
+                sendMessage: (message, options) => messages.push({ message, options }),
+            });
+
+            assert.equal(result.outcome?.status, "failed");
+            assert.equal(result.outcome?.incomplete, true);
+            assert.notEqual(result.outcome?.classification, "complete");
+            assert.equal(result.outcome?.diagnostics.sawTerminalEvent, false);
+
+            const persisted = readMeta(id);
+            assert.notEqual(persisted?.lifecycleClassification, "complete");
+
+            const rendered = buildSubagentResultText(id);
+            assert.doesNotMatch(rendered, /lifecycle complete/);
+            assert.match(rendered, /lifecycle incomplete/);
+        } finally {
+            rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
+
+    // @covers subagent.run-finalization
+    // @level integration
+    // @fails-without-fix subagent.run-finalization
     it("detects unmatched tool start from a large newline-free record before a terminal tail event", () => {
         const id = `sa_finalize_large_tool_${process.pid}_${Date.now()}`;
         const messages = [];

@@ -65,12 +65,23 @@ Continues human-approved structural lifecycle scanner authority split:
 - [done] Scanner regressions: trailing-comma oversized agent_end; malformed tool_execution_end; invalid primitives/escapes/mismatched delimiters.
 - [done] Real `finalizeRun` / `buildSubagentResultText` regressions for trailing-comma agent_end and malformed tool_execution_end never produce clean completion.
 
+
+## Round-6 / split-scope fix (duplicate semantic lifecycle keys)
+
+Continues human-approved structural lifecycle scanner authority split after post-split recurrence on PR #102:
+
+- [done] Fail closed on duplicate semantic top-level lifecycle keys (`type` / `toolCallId` / `toolName`) before applying any field evidence from that record.
+- [done] Object keys are JSON-decoded (including `\uXXXX` escapes) before lifecycle-key matching and duplicate detection, so `"toolCall\u0049d"` is treated as `toolCallId`.
+- [done] A grammar-valid record with duplicate `toolCallId` (final value null or otherwise) cannot retain a stale earlier capture or balance an open tool; the record/stream is untrusted (`complete:false`) and terminal authority is cleared.
+- [done] Scanner regressions: duplicate toolCallId+null; escaped equivalent key duplicate; duplicate type.
+- [done] Real `finalizeRun` / `buildSubagentResultText` regressions for duplicate and escaped-duplicate toolCallId never produce clean completion.
+
 ## Contract matrix (`lifecycle-validation-authority` × `subagent_lifecycle_result`)
 
 | state | proof |
 |---|---|
 | `legacy_completed_metadata` | `tests/incomplete_result.test.mjs` :: legacy completed without stream evidence; `tests/run_finalization.test.mjs` :: reclassifies legacy completed metadata when unmatched tools are outside the parse window |
-| `fresh_finalization` | `tests/run_finalization.test.mjs` :: finalizeRun integration (incomplete / complete / failed_exit / truncated unmatched-tool window / large newline-free complete / truncated early-type EOF fail-closed / nested-type ordering fail-closed / trailing-comma malformed agent_end fail-closed / malformed tool_execution_end fail-closed / large unmatched tool) |
+| `fresh_finalization` | `tests/run_finalization.test.mjs` :: finalizeRun integration (incomplete / complete / failed_exit / truncated unmatched-tool window / large newline-free complete / truncated early-type EOF fail-closed / nested-type ordering fail-closed / trailing-comma malformed agent_end fail-closed / malformed tool_execution_end fail-closed / duplicate toolCallId fail-closed / escaped duplicate key fail-closed / large unmatched tool) |
 | `result_formatting` | `tests/incomplete_result.test.mjs` + `buildSubagentResultText` in finalizeRun integration (including truncated-window + large-record + structural fail-closed bodies) |
 | `callback_notification` | finalizeRun integration asserts ATTENTION + lifecycle label for incomplete (incl. truncated unmatched tools + truncated early-type + nested-type + open-tools); `tests/callback_completion.test.mjs` |
 
@@ -85,6 +96,7 @@ Adjacent members checked under the same contract (round-4 split-scope structural
 | nested type before real top-level type ignored | parse_run nested-type ownership + finalize nested message_end incomplete |
 | closed oversized trailing-comma agent_end fails closed | parse_run + finalize trailing-comma malformed agent_end (`complete:false`, no sawEnd) |
 | malformed tool_execution_end never balances open tool | parse_run + finalize malformed tool end (no clean completion; stream untrusted) |
+| duplicate semantic lifecycle keys fail closed (no stale capture) | parse_run + finalize duplicate toolCallId/null + escaped equivalent key |
 | invalid primitives/escapes/mismatched delimiters fail closed | parse_run invalid grammar matrix |
 | late top-level type on oversized valid record | parse_run late-type complete |
 | normal coherent completion remains complete | finalize complete + large nl-free complete |
@@ -99,3 +111,4 @@ Adjacent members checked under the same contract (round-4 split-scope structural
 - [done] Slice E: round-2/3 blockers — complete-stream authority + bounded newline-free record scanning.
 - [done] Slice F: round-4 split-scope — structural lifecycle scanner authority (top-level ownership + malformed fail-closed).
 - [done] Slice G: round-5 split-scope — complete JSON grammar authority before lifecycle field application.
+- [done] Slice H: round-6 split-scope — fail closed on duplicate semantic lifecycle keys (decoded/escaped equivalents).

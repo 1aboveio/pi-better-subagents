@@ -315,6 +315,8 @@ interface StructuralRecordScan {
     type?: string;
     toolCallId?: string;
     toolName?: string;
+    /** Semantic lifecycle keys already observed at depth 1 (decoded). */
+    seenLifecycleKeys: Set<string>;
 }
 
 function createStructuralRecordScan(): StructuralRecordScan {
@@ -337,6 +339,7 @@ function createStructuralRecordScan(): StructuralRecordScan {
         keyBuf: "",
         capturingValue: false,
         valueBuf: "",
+        seenLifecycleKeys: new Set(),
     };
 }
 
@@ -348,9 +351,36 @@ function markMalformed(scan: StructuralRecordScan): void {
     scan.malformed = true;
 }
 
+/**
+ * Decode a captured object-key buffer (escape sequences already retained as
+ * JSON source fragments) into its semantic string. Returns null on bad escapes.
+ */
+function decodeCapturedKey(raw: string): string | null {
+    return unescapeJsonStringContent(raw);
+}
+
+/**
+ * Record a top-level lifecycle key. Duplicate semantic keys (including escaped
+ * equivalent spellings) fail the record closed — no field evidence from an
+ * ambiguous record may authorize terminal/tool balance.
+ */
+function noteTopLevelLifecycleKey(scan: StructuralRecordScan, decodedKey: string): void {
+    if (!LIFECYCLE_TOP_LEVEL_KEYS.has(decodedKey)) return;
+    if (scan.seenLifecycleKeys.has(decodedKey)) {
+        markMalformed(scan);
+        return;
+    }
+    scan.seenLifecycleKeys.add(decodedKey);
+}
+
 function assignTopLevelLifecycleValue(scan: StructuralRecordScan): void {
     const key = scan.currentKey;
     if (!key || !LIFECYCLE_TOP_LEVEL_KEYS.has(key)) return;
+    // Duplicates are rejected when the key is observed; defensive guard here.
+    if (!scan.seenLifecycleKeys.has(key)) {
+        markMalformed(scan);
+        return;
+    }
     const value = unescapeJsonStringContent(scan.valueBuf);
     if (value === null) {
         markMalformed(scan);
@@ -625,7 +655,16 @@ function feedStructuralRecordChar(scan: StructuralRecordScan, ch: string): void 
                 scan.stringIsKey = false;
                 if (scan.capturingKey) {
                     scan.capturingKey = false;
-                    scan.currentKey = scan.keyBuf;
+                    const decoded = decodeCapturedKey(scan.keyBuf);
+                    if (decoded === null) {
+                        markMalformed(scan);
+                        return;
+                    }
+                    // Fail closed on duplicate semantic lifecycle keys before any
+                    // value is applied (escaped equivalents normalize first).
+                    noteTopLevelLifecycleKey(scan, decoded);
+                    if (scan.malformed) return;
+                    scan.currentKey = decoded;
                 } else {
                     scan.currentKey = null;
                 }

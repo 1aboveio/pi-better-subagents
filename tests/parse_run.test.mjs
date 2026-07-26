@@ -420,6 +420,99 @@ describe("parseRun tool execution coherence", () => {
     // @covers subagent.run-log-parser
     // @level unit
     // @fails-without-fix subagent.run-log-parser
+    it("fails closed on duplicate top-level toolCallId so a null final value cannot keep a stale capture", () => {
+        const id = `sa_parse_dup_toolcallid_${process.pid}_${Date.now()}`;
+        mkdirSync(runDir(id), { recursive: true });
+        writeFileSync(
+            logPathFor(id),
+            [
+                JSON.stringify({
+                    type: "tool_execution_start",
+                    toolCallId: "call_bash",
+                    toolName: "bash",
+                }),
+                // Grammar-valid JSON with duplicate toolCallId; final value is null.
+                // Must not retain call_bash and must not balance the open tool.
+                `{"type":"tool_execution_end","toolCallId":"call_bash","toolCallId":null}`,
+                JSON.stringify({ type: "agent_end" }),
+                "",
+            ].join("\n"),
+        );
+
+        try {
+            const evidence = scanLifecycleEvidence(id);
+            assert.equal(evidence.complete, false);
+            assert.equal(evidence.sawEnd, false);
+            assert.deepEqual(evidence.unmatchedToolCalls, [{ id: "call_bash", toolName: "bash" }]);
+            assert.ok(evidence.diagnostics.some((d) => /malformed|unfinished|incomplete|duplicate/i.test(d)));
+
+            const authoritative = parseRunForLifecycle(id);
+            assert.equal(authoritative.sawEnd, false);
+            assert.deepEqual(authoritative.unmatchedToolCalls, [
+                { id: "call_bash", toolName: "bash" },
+            ]);
+        } finally {
+            rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
+
+    // @covers subagent.run-log-parser
+    // @level unit
+    // @fails-without-fix subagent.run-log-parser
+    it("normalizes escaped lifecycle keys before duplicate detection", () => {
+        const id = `sa_parse_dup_escaped_key_${process.pid}_${Date.now()}`;
+        mkdirSync(runDir(id), { recursive: true });
+        writeFileSync(
+            logPathFor(id),
+            [
+                JSON.stringify({
+                    type: "tool_execution_start",
+                    toolCallId: "call_bash",
+                    toolName: "bash",
+                }),
+                // Equivalent key spelling via \u escape must count as toolCallId duplicate.
+                `{"type":"tool_execution_end","toolCallId":"call_bash","toolCall\\u0049d":null}`,
+                JSON.stringify({ type: "agent_end" }),
+                "",
+            ].join("\n"),
+        );
+
+        try {
+            const evidence = scanLifecycleEvidence(id);
+            assert.equal(evidence.complete, false);
+            assert.equal(evidence.sawEnd, false);
+            assert.deepEqual(evidence.unmatchedToolCalls, [{ id: "call_bash", toolName: "bash" }]);
+            assert.ok(evidence.diagnostics.some((d) => /malformed|unfinished|incomplete|duplicate/i.test(d)));
+        } finally {
+            rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
+
+    // @covers subagent.run-log-parser
+    // @level unit
+    // @fails-without-fix subagent.run-log-parser
+    it("fails closed on duplicate top-level type fields", () => {
+        const id = `sa_parse_dup_type_${process.pid}_${Date.now()}`;
+        mkdirSync(runDir(id), { recursive: true });
+        // First type looks terminal; second type is non-terminal. Fail closed — no sawEnd.
+        writeFileSync(
+            logPathFor(id),
+            `{"type":"agent_end","type":"message_end"}\n`,
+        );
+
+        try {
+            const evidence = scanLifecycleEvidence(id);
+            assert.equal(evidence.complete, false);
+            assert.equal(evidence.sawEnd, false);
+            assert.ok(evidence.diagnostics.some((d) => /malformed|unfinished|incomplete|duplicate/i.test(d)));
+        } finally {
+            rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
+
+    // @covers subagent.run-log-parser
+    // @level unit
+    // @fails-without-fix subagent.run-log-parser
     it("tracks unmatched tools from large newline-free tool_execution_start records", () => {
         const id = `sa_parse_large_tool_${process.pid}_${Date.now()}`;
         writeLargeNewlineFreeRecord(id, {
