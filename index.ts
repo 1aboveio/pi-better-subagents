@@ -38,7 +38,6 @@ import {
     effectiveStatus,
     ownedByThisParent,
     navigatorVisibleRuns,
-    navigatorVisibleCount,
     dismissRun,
     type RunMeta,
 } from "./registry.ts";
@@ -181,11 +180,10 @@ function applyWidget(linesOrClear: string[] | typeof WIDGET_CLEAR): void {
 function renderWidget(): void {
     const ctx = uiCtx;
     if (!ctx || !ctx.hasUI) return;
-    const visibleCount = isNavigatorUiAvailable(ctx) ? navigatorVisibleCount(listMetas()) : 0;
-    const running = listMetas().filter((m) => ownedByThisParent(m) && effectiveStatus(m) === "running");
+    updateNavigatorFooter(ctx);
+    const running = navigatorRunningRuns();
     if (running.length === 0) {
-        const hint = navigatorFooterHint(visibleCount);
-        applyWidget(hint ? [hint] : WIDGET_CLEAR);
+        applyWidget(WIDGET_CLEAR);
         // Drop spend entries for runs that are no longer live so a restart
         // does not show stale totals for a recycled id.
         spendCache.clear();
@@ -205,6 +203,8 @@ function renderWidget(): void {
     }
     // buildWidgetLines includes shortModel(m.model) — preserves #14 list-show-model.
     const lines = buildWidgetLines({ running, frame, now, spendById });
+    const hint = navigatorFooterHint(running.length);
+    if (hint) lines.push(hint);
     applyWidget(lines);
 }
 
@@ -297,7 +297,8 @@ export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void 
 //   1. footer hint `← subagents · N` via the DEFAULT footer status mechanism
 //      (setStatus — the full footer is never replaced);
 //   2. an editor wrapper that intercepts bare ← only when the editor is empty
-//      and visible runs exist, delegating everything else to the wrapped
+//      and at least one non-dismissed current-parent run is running,
+//      delegating everything else to the wrapped
 //      editor (composition via navigator.mjs, tested with fakes);
 //   3. a focused overlay (ctx.ui.custom(..., { overlay: true })) listing the
 //      #44 navigatorVisibleRuns newest first, with Enter → live detail view
@@ -319,6 +320,15 @@ function navigatorRows() {
         fmtElapsed,
         spendFor: (m: RunMeta) => fmtSpend(parseRun(m.id).usage),
     });
+}
+
+/** Runs that should advertise/open the left-arrow navigator affordance. */
+function navigatorRunningRuns(): RunMeta[] {
+    return navigatorVisibleRuns(listMetas()).filter((m) => effectiveStatus(m) === "running");
+}
+
+function navigatorRunningCount(): number {
+    return navigatorRunningRuns().length;
 }
 
 /** Live detail snapshot for one run (registry + log parse). */
@@ -384,13 +394,13 @@ function openNavigator(ctx: ExtensionContext): void {
     } catch { /* never let UI glue break the session */ }
 }
 
-/** Publish/clear the `← subagents · N` footer hint (dirty-checked). */
+/** Publish/clear the running-only `← subagents · N` footer hint (dirty-checked). */
 function updateNavigatorFooter(ctx: ExtensionContext | undefined): void {
     if (!isNavigatorUiAvailable(ctx)) return;
     try {
-        const hint = navigatorFooterHint(navigatorVisibleCount(listMetas()));
+        const hint = navigatorFooterHint(navigatorRunningCount());
         if (hint === lastNavigatorHint) return;
-        applyNavigatorFooter(ctx!.ui, navigatorVisibleCount(listMetas()));
+        applyNavigatorFooter(ctx!.ui, navigatorRunningCount());
         lastNavigatorHint = hint;
     } catch { /* ignore */ }
 }
@@ -403,7 +413,7 @@ function installNavigator(ctx: ExtensionContext): void {
             createDefaultEditor: (tui: any, theme: any, keybindings: any) =>
                 new CustomEditor(tui, theme, keybindings),
             isOpenTrigger: (data: string) => matchesKey(data, Key.left),
-            canOpen: () => navigatorVisibleCount(listMetas()) > 0,
+            canOpen: () => navigatorRunningCount() > 0,
             onOpen: () => openNavigator(ctx),
         });
     } catch { /* ignore */ }
@@ -844,8 +854,12 @@ export default function (pi: ExtensionAPI) {
         installNavigator(ctx);
         lastNavigatorHint = undefined;
         updateNavigatorFooter(ctx);
-        if (listMetas().some((m) => ownedByThisParent(m) && effectiveStatus(m) === "running")) ensureTicker();
-        else renderWidget();
+        if (listMetas().some((m) => ownedByThisParent(m) && effectiveStatus(m) === "running")) {
+            ensureTicker();
+            renderWidget();
+        } else {
+            renderWidget();
+        }
         // Resume supervision reconciliation across /reload while current-parent
         // running/orphaned work exists; the ticker stops itself when idle.
         if (needsMonitoring(listMetas())) ensureHealthTicker();

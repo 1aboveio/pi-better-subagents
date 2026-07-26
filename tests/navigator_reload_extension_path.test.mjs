@@ -334,43 +334,65 @@ describe("registered extension path: session_start reload cleanup", () => {
 
     // @covers navigator.hardening
     // @level integration
-    it("second session_start disposes live detail/arm timers, clears confirm, does not stack editor, republishes footer", async () => {
-        timerSpies = installTimerSpies();
+    it("terminal-only session_start clears the left-arrow affordance", async () => {
         const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
-        // Terminal run keeps the widget ticker off so the only live interval
-        // after open+enter is the detail tick (not the passive live widget).
-        const id = nav.seedRun({
-            id: trackDisk(`sa_t48_reload_${Date.now()}`),
-            name: "reload-job",
+        nav.seedRun({
+            id: trackDisk(`sa_t48_terminal_${Date.now()}`),
+            name: "done-job",
             status: "completed",
             pid: 0,
             endedAt: 42,
         });
 
-        // 1) First session_start installs the empty-editor wrapper + count footer.
+        await nav.start();
+
+        assert.equal(nav.lastStatus("subagents-nav"), undefined, "terminal-only runs clear the footer hint");
+        assert.equal(
+            nav.widgetCalls.some((c) => c[0] === "subagents" && Array.isArray(c[1]) && c[1].some((line) => line.includes("← subagents"))),
+            false,
+            "terminal-only runs do not paint a fallback left-arrow widget",
+        );
+    });
+
+    // @covers navigator.hardening
+    // @level integration
+    it("second session_start disposes live detail/arm timers, clears confirm, does not stack editor, republishes running-only affordance", async () => {
+        timerSpies = installTimerSpies();
+        const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
+        const runningId = nav.seedRun({
+            id: trackDisk(`sa_t48_reload_${Date.now()}`),
+            name: "reload-job",
+            status: "running",
+            pid: THIS_PID,
+            startedAt: 100,
+        });
+        nav.seedRun({
+            id: trackDisk(`sa_t48_reload_done_${Date.now()}`),
+            name: "finished-job",
+            status: "completed",
+            pid: 0,
+            startedAt: 50,
+            endedAt: 90,
+        });
+        const runningHint = "← subagents · 1";
+
+        // 1) First session_start installs the empty-editor wrapper + running-only footer.
         await nav.start();
         assert.equal(nav.setEditorCount, 1, "first session_start installs editor once");
         assert.equal(nav.ui.factory?.__piBetterSubagentsNavigatorFactory, true, "factory is marked");
         const footerAfterStart = nav.lastStatus("subagents-nav");
         const widgetAfterStart = nav.lastWidget("subagents");
-        assert.equal(
-            footerAfterStart,
-            `← subagents · ${registry.navigatorVisibleCount(registry.listMetas(), THIS_PID)}`,
-            "first session_start publishes count footer",
-        );
-        assert.deepEqual(
-            widgetAfterStart,
-            [`← subagents · ${registry.navigatorVisibleCount(registry.listMetas(), THIS_PID)}`],
-            "first session_start publishes fallback navigator widget for terminal visible runs",
-        );
+        assert.equal(footerAfterStart, runningHint, "first session_start publishes running-only count footer");
+        assert.ok(Array.isArray(widgetAfterStart), "running session_start paints the live widget");
+        assert.equal(widgetAfterStart.at(-1), runningHint, "live widget includes the left-arrow hint for footer-limited terminals");
 
         // 2) Open via the registered empty-editor Left path.
         const component = await nav.openViaLeftKey();
 
-        // 3) Enter detail and arm close confirmation → live detail interval + arm timeout.
+        // 3) Enter detail and arm close confirmation → widget interval + health interval + live detail interval + arm timeout.
         nav.press("enter");
         nav.press("x");
-        assert.equal(timerSpies.pendingIntervals(), 1, "detail tick interval is live");
+        assert.equal(timerSpies.pendingIntervals(), 3, "widget, health, and detail tick intervals are live");
         assert.equal(timerSpies.pendingTimeouts(), 1, "close-arm timeout is live");
         const confirmAfterArm = nav.lastStatus("subagents-close");
         assert.equal(
@@ -389,7 +411,7 @@ describe("registered extension path: session_start reload cleanup", () => {
 
         // 5a) Prior overlay timers + confirmation cleared by the registered
         // session_start path (disposeTrackedNavigator + CLOSE_CONFIRM clear).
-        assert.equal(timerSpies.pendingIntervals(), 0, "reload must clear detail interval");
+        assert.equal(timerSpies.pendingIntervals(), 2, "reload must clear detail interval while keeping widget and health tickers");
         assert.equal(timerSpies.pendingTimeouts(), 0, "reload must clear close-arm timeout");
         const confirmAfterReload = nav.lastStatus("subagents-close");
         assert.equal(confirmAfterReload, undefined, "reload clears CLOSE_CONFIRM_STATUS_KEY");
@@ -410,28 +432,21 @@ describe("registered extension path: session_start reload cleanup", () => {
         // 5c) Footer count is republished after lastNavigatorHint reset.
         const footerAfterReload = nav.lastStatus("subagents-nav");
         const widgetAfterReload = nav.lastWidget("subagents");
-        assert.equal(
-            footerAfterReload,
-            `← subagents · ${registry.navigatorVisibleCount(registry.listMetas(), THIS_PID)}`,
-            "reload republishes navigator count footer",
-        );
-        assert.deepEqual(
-            widgetAfterReload,
-            [`← subagents · ${registry.navigatorVisibleCount(registry.listMetas(), THIS_PID)}`],
-            "reload republishes fallback navigator widget",
-        );
+        assert.equal(footerAfterReload, runningHint, "reload republishes running-only navigator count footer");
+        assert.ok(Array.isArray(widgetAfterReload), "reload repaints the live widget");
+        assert.equal(widgetAfterReload.at(-1), runningHint, "reload republishes the widget left-arrow hint");
         assert.ok(
             nav.statusCalls.slice(statusLenBeforeReload).some((c) => c[0] === "subagents-nav" && typeof c[1] === "string"),
-            "reload path must re-invoke setStatus for the count footer",
+            "reload path must re-invoke setStatus for the running count footer",
         );
         assert.ok(
-            nav.widgetCalls.slice(widgetLenBeforeReload).some((c) => c[0] === "subagents" && Array.isArray(c[1]) && c[1][0].startsWith("← subagents")),
-            "reload path must re-invoke setWidget for the fallback navigator hint",
+            nav.widgetCalls.slice(widgetLenBeforeReload).some((c) => c[0] === "subagents" && Array.isArray(c[1]) && c[1].at(-1) === runningHint),
+            "reload path must re-invoke setWidget for the live navigator hint",
         );
 
         // Seed still visible (reload is non-mutating for runs).
         assert.ok(
-            registry.navigatorVisibleRuns(registry.listMetas(), THIS_PID).some((m) => m.id === id),
+            registry.navigatorVisibleRuns(registry.listMetas(), THIS_PID).some((m) => m.id === runningId),
             "reload must not dismiss the open run",
         );
 
