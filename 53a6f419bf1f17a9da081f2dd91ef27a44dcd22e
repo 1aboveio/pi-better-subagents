@@ -1,0 +1,1 @@
+fix: strip trailing whitespace on theme-stub comment (git diff --check) and dispose the list-mode overlay component under test so teardown matches the navigator contract. CI cancellation on 961a661 was a self-hosted runner shutdown mid-suite (orphan node/git processes cleaned up), not a #69 hang or assertion failure.
