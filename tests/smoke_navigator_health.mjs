@@ -22,6 +22,7 @@ import {
     formatNavigatorRowText,
     buildDetailLines,
     createNavigatorState,
+    navigatorSectionLabel,
 } from "../navigator.ts";
 import { observeRunHealth } from "../health-observation.ts";
 import { fmtElapsed, shortModel } from "../widget.ts";
@@ -150,7 +151,7 @@ const detailLines = buildDetailLines({
     now: NOW,
 }, { width: 60, colorizeStatus: true, fg: (c, s) => s });
 const detailText = detailLines.join("\n");
-const sectionAt = (label) => detailLines.findIndex((l) => l === label);
+const sectionAt = (label) => detailLines.findIndex((l) => navigatorSectionLabel(l) === label);
 must("detail has process section", sectionAt("process") >= 0);
 must("detail has compaction section", sectionAt("compaction") >= 0);
 must("detail has active tool section", sectionAt("active tool") >= 0);
