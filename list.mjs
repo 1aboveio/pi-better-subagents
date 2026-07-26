@@ -1,8 +1,18 @@
 import { fmtElapsed, fmtSpend } from "./widget.mjs";
+import { formatListHealthSuffix } from "./health-surface.mjs";
 
 export const SUBAGENT_LIST_DEFAULT_LIMIT = 20;
 export const SUBAGENT_LIST_MAX_LIMIT = 100;
-export const SUBAGENT_LIST_STATUSES = ["running", "completed", "failed", "killed", "exited"];
+/** Effective + durable supervision statuses accepted by subagent_list filters. */
+export const SUBAGENT_LIST_STATUSES = [
+    "running",
+    "completed",
+    "failed",
+    "killed",
+    "exited",
+    "orphaned",
+    "lost",
+];
 
 const STATUS_SET = new Set(SUBAGENT_LIST_STATUSES);
 
@@ -63,10 +73,11 @@ export function formatSubagentListRow(meta, p) {
     const spend = fmtSpend(usage);
     const name = meta.name ? `${meta.name} ` : "";
     const stat = `${elapsed}${spend ? ` · ${spend}` : ""}`;
+    const health = formatListHealthSuffix(p.health);
     const batch = meta.batchId
         ? `  [batch: ${meta.batchName ? `${meta.batchName} ` : ""}${meta.batchId}]`
         : "";
-    return `• ${name}${meta.id}  [${status}]  ${meta.model ?? "?"}  ${stat}${batch}\n    ${promptPreview(meta)}`;
+    return `• ${name}${meta.id}  [${status}]  ${meta.model ?? "?"}  ${stat}${health}${batch}\n    ${promptPreview(meta)}`;
 }
 
 export function buildSubagentList(p) {
@@ -75,6 +86,7 @@ export function buildSubagentList(p) {
     const parentPid = p.parentPid ?? process.pid;
     const statusOf = p.statusOf ?? ((meta) => meta.status);
     const usageById = p.usageById ?? (() => undefined);
+    const healthById = p.healthById ?? (() => undefined);
 
     const scoped = (p.metas ?? [])
         .filter((meta) => options.all || meta.spawnPid === parentPid)
@@ -97,6 +109,7 @@ export function buildSubagentList(p) {
         status: row.status,
         now,
         usage: usageById(row.meta.id),
+        health: healthById(row.meta.id),
     })));
 
     if (matching.length > displayed.length) {

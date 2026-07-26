@@ -304,10 +304,22 @@ describe("needsMonitoring", () => {
         assert.equal(needsMonitoring([{ id: "a", spawnPid: parent, status: "running" }], parent), true);
         assert.equal(needsMonitoring([{ id: "a", spawnPid: parent, status: "orphaned" }], parent), true);
     });
-    it("is false when only terminal or foreign-parent runs remain", () => {
+    it("is true for unmarked lost (durable callback recovery)", () => {
+        assert.equal(needsMonitoring([{ id: "a", spawnPid: parent, status: "lost" }], parent), true);
+        assert.equal(
+            needsMonitoring([{ id: "a", spawnPid: parent, status: "lost", lostCallbackSentAt: undefined }], parent),
+            true,
+        );
+    });
+    it("is false when only terminal-or-handled or foreign-parent runs remain", () => {
         assert.equal(needsMonitoring([{ id: "a", spawnPid: parent, status: "completed" }], parent), false);
-        assert.equal(needsMonitoring([{ id: "a", spawnPid: parent, status: "lost" }], parent), false);
+        assert.equal(
+            needsMonitoring([{ id: "a", spawnPid: parent, status: "lost", lostCallbackSentAt: 1 }], parent),
+            false,
+            "marked lost no longer needs the ticker",
+        );
         assert.equal(needsMonitoring([{ id: "a", spawnPid: 99999, status: "running" }], parent), false);
+        assert.equal(needsMonitoring([{ id: "a", spawnPid: 99999, status: "lost" }], parent), false);
         assert.equal(needsMonitoring([], parent), false);
     });
 });
