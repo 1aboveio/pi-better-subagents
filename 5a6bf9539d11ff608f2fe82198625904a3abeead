@@ -1,0 +1,1 @@
+fix review: detail health observation uses effectiveStatus so legacy dead-running metadata cannot show status exited with liveness supervised; processLiveness treats exited as terminal; detail render guards against supervised liveness under non-running effective status; regression in navigator_health.test.mjs
