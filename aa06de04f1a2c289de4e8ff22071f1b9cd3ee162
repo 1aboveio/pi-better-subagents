@@ -1,1 +1,1 @@
-Stamp runtime-smoke headSha to exact PR HEAD and restamp reviewer-parity proof.
+Drop self-referential smoke headSha stamp (cannot equal containing commit); smoke results remain command-rerunnable.
