@@ -221,20 +221,26 @@ export function subagentStopTool(
     return {
         name: "subagent_stop",
         label: "Stop Subagent",
-        description: "Terminate a running subagent (SIGTERM to its process group).",
-        promptSnippet: "Stop a running background subagent",
+        description:
+            "Stop a running or orphaned subagent. Terminates identifiable related " +
+            "process-group members when present; otherwise finalizes from log " +
+            "evidence (completed/failed) or records lost.",
+        promptSnippet: "Stop a running or orphaned background subagent",
         parameters: Type.Object({
             id: Type.String({ description: "Run id from subagent_spawn." }),
         }),
         async execute(_id: string, params: unknown) {
             const p = params as { id: string };
-            // Shared stop semantics with the TUI navigator close action (#44):
+            // Shared stop semantics with the TUI navigator close action (#44/#68):
             // stopRun rereads meta + effective status from disk before acting.
             const outcome = stopRun(p.id);
             if (outcome.action === "not-running") {
                 return text(`Run ${p.id} is not running (${outcome.status}).`);
             }
             deps.onStopped?.();
+            if (outcome.action === "finalized") {
+                return text(`Resolved orphaned subagent ${p.id} → ${outcome.status}.`);
+            }
             return text(`Stopped subagent ${p.id}.`);
         },
     } as ToolDefinition;

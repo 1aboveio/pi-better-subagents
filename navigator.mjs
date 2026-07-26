@@ -56,14 +56,15 @@ export function applyNavigatorFooter(ui, count) {
 
 /**
  * Footer confirmation hint while Close is armed.
- * Running → `x again to stop <name>`; terminal → `x again to dismiss <name>`.
- * Name falls back to id when missing/null.
+ * Running/orphaned → `x again to stop <name>`; terminal → `x again to dismiss <name>`.
+ * Name falls back to id when missing/null. Orphaned uses the stop wording because
+ * Close runs the shared #68 cleanup path (kill related work or finalize).
  */
 export function closeConfirmHint(row) {
     if (!row) return null;
     const label = (row.name != null && String(row.name).length > 0) ? String(row.name) : String(row.id);
-    const running = row.status === "running";
-    return running ? `x again to stop ${label}` : `x again to dismiss ${label}`;
+    const stoppable = row.status === "running" || row.status === "orphaned";
+    return stoppable ? `x again to stop ${label}` : `x again to dismiss ${label}`;
 }
 
 /**
@@ -99,9 +100,11 @@ export function disarmClose(arm) {
 
 /**
  * Perform Close on a run id: reread meta + effective status, then either
- * stop+dismiss (running) or dismiss-only (terminal / finished-during-arm).
+ * stop+dismiss (running / orphaned) or dismiss-only (terminal / finished-during-arm).
  *
- * Reuses #44 `stopRun` / `dismissRun` — never invents a second kill path.
+ * Reuses #44/#68 `stopRun` / `dismissRun` — never invents a second kill path.
+ * For orphaned runs, dismiss happens only AFTER `stopRun` writes a terminal
+ * status (killed / completed / failed / lost).
  * Unknown ids return `{ action: "missing" }` without throwing.
  *
  * @param {string} id
@@ -117,12 +120,31 @@ export function executeNavigatorClose(id, deps) {
     if (!meta) return { action: "missing", id };
     const status = deps.effectiveStatus(meta);
     const at = typeof deps.now === "function" ? deps.now() : Date.now();
-    if (status === "running") {
-        // stopRun itself rereads; we still branch on our fresh effective status
-        // so a finish-during-arm never reaches the kill path from a stale row.
-        deps.stopRun(id);
+    // running + orphaned share the stop path (#68). stopRun itself rereads;
+    // we still branch on our fresh effective status so a finish-during-arm
+    // never reaches the kill path from a stale row.
+    if (status === "running" || status === "orphaned") {
+        const outcome = deps.stopRun(id);
+        // Dismiss only after a terminal write. stopRun always finalizes
+        // orphaned runs (killed / completed / failed / lost) when accepted.
+        const terminalStatus = outcome?.action === "stopped"
+            ? "killed"
+            : outcome?.action === "finalized"
+                ? outcome.status
+                : undefined;
+        if (!terminalStatus) {
+            // Defensive: stop declined (race to another terminal). Leave
+            // non-terminal orphaned undismissed so Close can be retried.
+            const after = deps.readMeta(id);
+            const afterStatus = after ? deps.effectiveStatus(after) : status;
+            if (afterStatus === "orphaned" || afterStatus === "running") {
+                return { action: "not-closed", id, status: afterStatus };
+            }
+            deps.dismissRun(id, at);
+            return { action: "dismissed", id, status: afterStatus };
+        }
         deps.dismissRun(id, at);
-        return { action: "stopped-and-dismissed", id, status: "killed" };
+        return { action: "stopped-and-dismissed", id, status: terminalStatus };
     }
     deps.dismissRun(id, at);
     return { action: "dismissed", id, status };
