@@ -105,3 +105,61 @@ export function buildCompletionDelivery(p) {
         options: { deliverAs: "nextTurn" },
     };
 }
+
+/**
+ * Format a health-attention trigger for orphaned/lost transitions (#65).
+ *
+ * Distinct from completion triggers: this is an ATTENTION signal that
+ * supervision broke (or ran out), not that a coherent result is ready.
+ * Never embeds artifacts — the coordinator inspects via tools.
+ *
+ * @param p.id     - Run id
+ * @param p.label  - Human-readable label
+ * @param p.status - "orphaned" | "lost"
+ */
+export function formatHealthCallbackTrigger(p) {
+    const inspect =
+        `Inspect with subagent_result id="${p.id}" and subagent_output id="${p.id}". ` +
+        `You may wait, stop (subagent_stop id="${p.id}"), or retry from the original task.`;
+    if (p.status === "orphaned") {
+        return (
+            `ATTENTION: a background subagent lost supervision and is now orphaned.\n` +
+            `subagent: ${p.label} · status orphaned\n\n` +
+            `Supervision was lost; related process-group work may still be alive. ` +
+            `This is not a final result.\n\n` +
+            inspect
+        );
+    }
+    return (
+        `ATTENTION: a background subagent is lost.\n` +
+        `subagent: ${p.label} · status lost\n\n` +
+        `No related process remains and no coherent terminal completion was observed. ` +
+        `This is a terminal unknown outcome, not a normal failure.\n\n` +
+        inspect
+    );
+}
+
+/**
+ * Build the model delivery for an orphaned/lost health transition.
+ *
+ * Uses the same non-interrupting mechanics as completion
+ * (`deliverAs: "followUp", triggerTurn: true`) but distinct ATTENTION wording.
+ * Returns null when callback is false — model follow-up is suppressed; the
+ * caller still owns human ui.notify / TUI-visible state.
+ *
+ * @param p.id       - Run id
+ * @param p.label    - Human-readable label
+ * @param p.status   - "orphaned" | "lost"
+ * @param p.callback - Whether to trigger a coordinator turn (default true)
+ */
+export function buildHealthCallbackDelivery(p) {
+    if (p.callback === false) return null;
+    return {
+        content: formatHealthCallbackTrigger({
+            id: p.id,
+            label: p.label,
+            status: p.status,
+        }),
+        options: { deliverAs: "followUp", triggerTurn: true },
+    };
+}

@@ -18,6 +18,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readMeta, listMetas, effectiveStatus, isFinalResultStatus } from "./registry.ts";
 import { parseRun, tailLog, formatSubagentOutputBody } from "./parse.ts";
 import { buildSubagentResultText } from "./finalization.ts";
+import { formatOrphanedResult } from "./lifecycle.ts";
 import { stopRun } from "./stop.ts";
 import { fmtElapsed, fmtSpend } from "./widget.ts";
 import {
@@ -128,15 +129,19 @@ export function subagentResultTool(Type: TypeModule): ToolDefinition {
                 if (st === "orphaned") {
                     // Non-terminal: supervision is broken but related process-
                     // group work may still be alive — never present this as a
-                    // final result.
-                    return text(
-                        `Run ${p.id} is orphaned — supervision was lost, but related processes may still be alive. ` +
-                        `There is no final result; use subagent_output for current (possibly still changing) output.`,
-                    );
+                    // final result. Surface best-CURRENT artifacts (#65).
+                    const r = parseRun(p.id);
+                    const el = fmtElapsed((meta.endedAt ?? Date.now()) - meta.startedAt);
+                    const spend = fmtSpend(r.usage);
+                    const tools = r.toolCalls.length ? ` · tools: ${r.toolCalls.join(", ")}` : "";
+                    const head = `[${p.id} · orphaned · ${el}${spend ? ` · ${spend}` : ""}${tools}]`;
+                    const rawTail = tailLog(p.id, 40);
+                    return text(`${head}\n${formatOrphanedResult(r, rawTail)}`);
                 }
                 return text(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`);
             }
             // Lifecycle-aware body (complete-stream authority + diagnostics).
+            // Lost runs go through formatLostResult inside formatSubagentResult (#65).
             const body = buildSubagentResultText(p.id);
             if (body === null) {
                 // Defensive: status race between effectiveStatus and body assembly.
