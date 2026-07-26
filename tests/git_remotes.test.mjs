@@ -1043,6 +1043,31 @@ describe("git_remotes.read (#109 push-only + read-failure)", () => {
                     },
                     "non-git directory must throw (not return [])",
                 );
+
+                // Unreadable source remote config (adjacent AC4/AC5 member).
+                // Making `.git/config` a directory is a privilege-safe way to force
+                // Git's config-read path to fail on every platform (including when
+                // tests run as a privileged user where chmod 000 is ineffective).
+                // This exercises the same assertGitRepository / config-read failure
+                // path as a permission-denied config without relying on chmod.
+                const unreadable = initRepo(join(base, "unreadable-config"));
+                runGit(unreadable, ["remote", "add", "origin", join(base, "somewhere.git")]);
+                rmSync(join(unreadable, ".git", "config"));
+                mkdirSync(join(unreadable, ".git", "config"));
+
+                assert.throws(
+                    () => readGitRemotes(unreadable),
+                    (err) => {
+                        assert.ok(err instanceof Error);
+                        assert.match(
+                            err.message,
+                            /remote|git|not a readable|configuration|permission|directory|failed/i,
+                            "unreadable source config must surface a useful error",
+                        );
+                        return true;
+                    },
+                    "unreadable source remote config must throw (not return [])",
+                );
             } finally {
                 rmSync(base, { recursive: true, force: true });
             }
@@ -1127,6 +1152,102 @@ describe("git_remotes.sync (#109 push-only + read-failure non-mutation)", () => 
                     branchList(push2, "push-only-proof"),
                     /push-only-proof/,
                     "push must land on second push-only destination",
+                );
+            } finally {
+                rmSync(base, { recursive: true, force: true });
+            }
+        },
+    );
+
+    // @covers git_remotes.sync
+    // @level unit
+    // @fails-without-fix git_remotes.sync
+    it("creates an absent push-only multi-pushurl remote on the target (ensureRemoteExists create path)",
+        () => {
+            // Adjacent member of push-only-remote-preservation: the existing rewrite
+            // case above starts from a path-style clone where origin already exists.
+            // This case drives the ensureRemoteExists push-only create branch where
+            // the remote name is absent from the target entirely.
+            const base = mkdtempSync(join(tmpdir(), "pi-remotes-push-only-create-"));
+            try {
+                const push1 = join(base, "create-a.git");
+                const push2 = join(base, "create-b.git");
+                initBare(push1);
+                initBare(push2);
+
+                const source = initRepo(join(base, "source"));
+                // Use a non-origin name so target cannot inherit it from a clone.
+                configurePushOnlyRemote(source, "deploy", [push1, push2]);
+                runGit(source, ["push", "deploy", "HEAD"]);
+
+                // Independent target repo: no `deploy` remote at all. Keep a stale
+                // remote that must be removed so sync still does full set reconcile.
+                const target = initRepo(join(base, "target"));
+                const staleBare = join(base, "stale.git");
+                initBare(staleBare);
+                runGit(target, ["remote", "add", "stale-only", staleBare]);
+                assert.equal(
+                    runGit(target, ["remote"]).split("\n").filter(Boolean).includes("deploy"),
+                    false,
+                    "fixture must start without the push-only remote name",
+                );
+
+                syncGitRemotes(source, target);
+
+                const model = readGitRemotes(target);
+                assert.deepEqual(
+                    model.map((r) => r.name).sort(),
+                    ["deploy"],
+                    "sync must create the absent push-only remote and drop stale ones",
+                );
+                const deploy = model.find((r) => r.name === "deploy");
+                assert.ok(deploy, "deploy must exist after create-path sync");
+                assert.deepEqual(
+                    deploy.urls,
+                    [],
+                    "created push-only remote must not invent a fetch URL",
+                );
+                assert.equal(deploy.pushUrls.length, 2, "both pushurls must be created");
+                assert.deepEqual(
+                    deploy.pushUrls.map(real).sort(),
+                    [real(push1), real(push2)].sort(),
+                );
+
+                // Structured config proof: zero remote.deploy.url keys, both pushurls.
+                let urlKeys = 0;
+                try {
+                    const out = runGit(target, ["config", "--get-all", "remote.deploy.url"]);
+                    urlKeys = out.split("\n").filter(Boolean).length;
+                } catch {
+                    urlKeys = 0;
+                }
+                assert.equal(
+                    urlKeys,
+                    0,
+                    "created push-only remote must have zero remote.deploy.url config keys",
+                );
+                assert.deepEqual(
+                    pushUrlsAll(target, "deploy").map(real).sort(),
+                    [real(push1), real(push2)].sort(),
+                    "git remote get-url --push --all must list both created push destinations",
+                );
+
+                // Behavioral proof: push from the newly created remote reaches both destinations.
+                runGit(target, ["checkout", "-b", "push-only-create-proof"]);
+                writeFileSync(join(target, "create-proof.txt"), "push-only-create-proof\n");
+                runGit(target, ["add", "create-proof.txt"]);
+                runGit(target, ["commit", "-m", "push-only-create-proof"]);
+                runGit(target, ["push", "-u", "deploy", "push-only-create-proof"]);
+
+                assert.match(
+                    branchList(push1, "push-only-create-proof"),
+                    /push-only-create-proof/,
+                    "create-path push must land on first push-only destination",
+                );
+                assert.match(
+                    branchList(push2, "push-only-create-proof"),
+                    /push-only-create-proof/,
+                    "create-path push must land on second push-only destination",
                 );
             } finally {
                 rmSync(base, { recursive: true, force: true });
@@ -1246,6 +1367,94 @@ describe("git_remotes.sync (#109 push-only + read-failure non-mutation)", () => 
                     })),
                 };
                 assert.deepEqual(after, before, "non-git source must leave target remotes untouched");
+            } finally {
+                rmSync(base, { recursive: true, force: true });
+            }
+        },
+    );
+
+    // @covers git_remotes.sync
+    // @level unit
+    // @fails-without-fix git_remotes.sync
+    it("aborts before mutating target remotes when source remote config is unreadable",
+        () => {
+            // Adjacent member of source-read-failure-non-mutation: missing and
+            // non-git sources are covered above; this drives the unreadable config
+            // path. `.git/config` as a directory forces Git config reads to fail
+            // deterministically without chmod (works under privileged CI users).
+            const base = mkdtempSync(join(tmpdir(), "pi-remotes-sync-unreadable-src-"));
+            try {
+                const originBare = join(base, "origin.git");
+                const mirrorBare = join(base, "mirror.git");
+                initBare(originBare);
+                initBare(mirrorBare);
+
+                const target = initRepo(join(base, "target"));
+                const pushDest = join(base, "push-dest.git");
+                initBare(pushDest);
+                runGit(target, ["remote", "add", "origin", originBare]);
+                runGit(target, ["remote", "add", "mirror", mirrorBare]);
+                runGit(target, ["remote", "set-url", "--push", "origin", pushDest]);
+
+                const before = {
+                    names: runGit(target, ["remote"]).split("\n").filter(Boolean).sort(),
+                    fetchOrigin: fetchUrlsAll(target, "origin").map(real),
+                    pushOrigin: pushUrlsAll(target, "origin").map(real),
+                    fetchMirror: fetchUrlsAll(target, "mirror").map(real),
+                    model: readGitRemotes(target).map((r) => ({
+                        name: r.name,
+                        urls: r.urls.map(real),
+                        pushUrls: r.pushUrls.map(real),
+                    })),
+                };
+                assert.equal(before.names.length, 2, "fixture must start with two remotes");
+
+                const unreadableSource = initRepo(join(base, "unreadable-source"));
+                // Give the source a remote that WOULD mutate the target if read succeeded
+                // and emptied/rewrote the set — then break its config so read fails first.
+                runGit(unreadableSource, [
+                    "remote",
+                    "add",
+                    "would-overwrite",
+                    join(base, "would-overwrite.git"),
+                ]);
+                rmSync(join(unreadableSource, ".git", "config"));
+                mkdirSync(join(unreadableSource, ".git", "config"));
+
+                assert.throws(
+                    () => syncGitRemotes(unreadableSource, target),
+                    (err) => {
+                        assert.ok(err instanceof Error);
+                        assert.match(
+                            err.message,
+                            /remote|git|not a readable|configuration|permission|directory|failed/i,
+                        );
+                        return true;
+                    },
+                    "sync must throw when source remote config is unreadable",
+                );
+
+                const after = {
+                    names: runGit(target, ["remote"]).split("\n").filter(Boolean).sort(),
+                    fetchOrigin: fetchUrlsAll(target, "origin").map(real),
+                    pushOrigin: pushUrlsAll(target, "origin").map(real),
+                    fetchMirror: fetchUrlsAll(target, "mirror").map(real),
+                    model: readGitRemotes(target).map((r) => ({
+                        name: r.name,
+                        urls: r.urls.map(real),
+                        pushUrls: r.pushUrls.map(real),
+                    })),
+                };
+                assert.deepEqual(
+                    after,
+                    before,
+                    "unreadable source must leave target remotes completely untouched",
+                );
+                // Git's own view (not just the model): names + exact URL keys.
+                assert.deepEqual(after.names, ["mirror", "origin"]);
+                assert.equal(after.fetchOrigin[0], real(originBare));
+                assert.equal(after.pushOrigin[0], real(pushDest));
+                assert.equal(after.fetchMirror[0], real(mirrorBare));
             } finally {
                 rmSync(base, { recursive: true, force: true });
             }
