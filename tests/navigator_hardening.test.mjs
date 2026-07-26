@@ -663,7 +663,8 @@ describe("navigator hardening: documentation", () => {
         assert.ok(/subagent navigator|navigator/i.test(readme), "README mentions the navigator");
         assert.ok(/empty|←|left/i.test(readme), "README describes empty-editor ← open");
         assert.ok(/↑|up|down|enter|esc/i.test(readme), "README describes list/detail controls");
-        assert.ok(/two-press|x again|press x/i.test(readme), "README describes two-press x close");
+        assert.ok(/two-press|x again|press x/i.test(readme), "README describes two-press x stop\/dismiss");
+        assert.ok(/x` arms Stop|x` arms Stop/i.test(readme), "README labels the x action as Stop instead of Close");
         assert.ok(/dismiss/i.test(readme), "README describes dismissal");
         assert.ok(/subagent_list|subagent_stop|tool/i.test(readme), "README notes tool access unchanged");
     });

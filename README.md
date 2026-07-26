@@ -237,32 +237,42 @@ reported per-request cost.
 
 ## Subagent navigator (TUI)
 
-In an interactive TUI session, a focused **subagent navigator** lets you inspect
-and organize runs without asking the model to call a tool. It is separate from
-the passive live widget (which stays a compact status signal and never takes
-keyboard focus). Print/RPC modes do not install the navigator; tool access is
-unchanged in every mode.
+In an interactive TUI session, a **subagent navigator** lets you inspect and
+organize runs without asking the model to call a tool. The running-subagents
+widget can be focused from an empty input line for quick actions; detail output
+opens in the overlay. Print/RPC modes do not install the navigator; tool access
+is unchanged in every mode.
 
 ### Open
 
 - With the editor **empty** and at least one non-dismissed current-parent run
-  still running, press
-  `←` to open the navigator overlay.
+  still running, press `←` to focus the main-window subagent list above the
+  input line.
 - If the editor contains text, `←` keeps normal cursor-left behavior.
 - While running runs exist, the default footer shows `← subagents · N`. The
-  live widget also includes the same hint for terminals that do not render the
-  default footer status. The hint clears when no non-dismissed current-parent
-  run is still running.
+  live widget also includes a secondary `← to navigate` hint on its title line
+  for terminals that do not render the default footer status. The hint clears
+  when no non-dismissed current-parent run is still running.
+- While the main-window list is focused, the title hint changes to
+  `Enter to view · x to stop`; the selected row is marked with `›`. Press
+  `↓` from the bottom row to return to the input line.
+- `↑` moves to the previous row when multiple running rows are shown. `↓`
+  moves toward the input line, returning to normal input from the bottom row.
+- `Enter` opens the selected run's live detail view. `x` stops the selected
+  running run using shared `subagent_stop` semantics and dismisses it from the
+  navigator.
 
-### List view
+### Overlay list view
 
-- Newest visible runs first (running and terminal). Dismissed runs are hidden
+- The overlay list is available after returning from detail with `←`. Newest
+  visible runs appear first (running and terminal). Dismissed runs are hidden
   from this list and from the running-count affordance only.
 - Each row: name or id · status · model · elapsed · spend.
 - `↑` / `↓` move selection. Selection stays on the same run across status
   refreshes when that run is still visible; if it disappears, selection clamps
   to a remaining row.
 - `enter` opens the live detail view for the selected run.
+- `x` arms Stop for a running run, or Dismiss for a terminal run.
 - `esc` closes the navigator.
 
 ### Detail view
@@ -271,11 +281,12 @@ unchanged in every mode.
   The view refreshes about once per second while open.
 - `←` returns to the list (selection restored on the viewed run when still
   visible).
+- `x` arms Stop for a running run, or Dismiss for a terminal run.
 - `esc` closes the entire navigator.
 
-### Two-press `x` close
+### Two-press `x` stop/dismiss
 
-- First `x` on the selected (list) or viewed (detail) run arms close for three
+- First `x` on the selected (list) or viewed (detail) run arms the action for three
   seconds and shows a footer hint: `x again to stop <name>` while running, or
   `x again to dismiss <name>` when terminal.
 - Second `x` within the window, on the **same** run, acts:
