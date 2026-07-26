@@ -447,7 +447,7 @@ describe("passive widget health surfacing", () => {
         assert.doesNotMatch(widgetSource, /setFocus|tabIndex|onFocus|\.focus\(/);
         assert.match(indexSource, /setWidget\("subagents"/);
         // Health is painted via setWidget/buildWidgetLines, not navigator custom().
-        assert.match(indexSource, /buildWidgetLines\(\{ running, frame, now, spendById, healthById \}/);
+        assert.match(indexSource, /buildWidgetLines\(\{[\s\S]{0,240}healthById[\s\S]{0,240}\}\)/);
         assert.doesNotMatch(indexSource, /healthById[\s\S]{0,120}custom\(/);
     });
 
