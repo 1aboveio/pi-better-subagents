@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-26T02:00:00.000Z",
+  "generatedAt": "2026-07-26T12:00:00.000Z",
   "surfaces": [
     {
       "id": "widget.render",
@@ -139,6 +139,20 @@
       "kind": "service",
       "class": "mutation",
       "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "subagent.health-callback",
+      "kind": "service",
+      "class": "mutation",
+      "path": "completion.mjs",
+      "reachable": true
+    },
+    {
+      "id": "subagent.result",
+      "kind": "service",
+      "class": "read",
+      "path": "tools.ts",
       "reachable": true
     }
   ]
